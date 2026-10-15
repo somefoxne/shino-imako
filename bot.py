@@ -133,24 +133,43 @@ def danbooru_api_request(method: str, url: str, **kwargs) -> requests.Response:
 # ==========================================
 def get_database_repo_url() -> str:
     """Trả về URL repo database, tự động nhúng GITHUB_TOKEN nếu có cấu hình trong .env"""
-    url = DATABASE_REPO_URL
+    url = DATABASE_REPO_URL.strip()
     github_token = os.getenv("GITHUB_TOKEN", "").strip() or os.getenv("GIT_TOKEN", "").strip()
     if github_token and url.startswith("https://") and "@" not in url:
-        url = url.replace("https://", f"https://{github_token}@")
+        # Sử dụng tiền tố x-access-token chuẩn cho GitHub Personal Access Token
+        url = url.replace("https://", f"https://x-access-token:{github_token}@")
     return url
 
 
+def run_git_command(args: List[str], cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+    """Chạy lệnh Git an toàn trong môi trường headless/VPS, không bị treo prompt terminal"""
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return subprocess.run(
+        args,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env=env
+    )
+
+
 def configure_git_repo(repo_dir: str):
-    """Cấu hình user.name, user.email và remote origin URL cho repository"""
-    if not os.path.exists(os.path.join(repo_dir, ".git")):
-        return
+    """Cấu hình user.name, user.email, safe.directory và remote origin URL cho repository"""
     try:
-        subprocess.run(["git", "-C", repo_dir, "config", "user.name", "Shino Imako Bot"], check=False)
-        subprocess.run(["git", "-C", repo_dir, "config", "user.email", "bot@shino-imako.local"], check=False)
-        target_url = get_database_repo_url()
-        subprocess.run(["git", "-C", repo_dir, "remote", "set-url", "origin", target_url], check=False)
-    except Exception:
-        pass
+        # Tránh lỗi 'dubious ownership' phổ biến trên Docker / Pterodactyl container (Vibe Host)
+        run_git_command(["git", "config", "--global", "--add", "safe.directory", "*"])
+        if os.path.exists(repo_dir):
+            abs_repo_dir = os.path.abspath(repo_dir).replace("\\", "/")
+            run_git_command(["git", "config", "--global", "--add", "safe.directory", abs_repo_dir])
+
+        if os.path.exists(os.path.join(repo_dir, ".git")):
+            run_git_command(["git", "-C", repo_dir, "config", "user.name", "Shino Imako Bot"])
+            run_git_command(["git", "-C", repo_dir, "config", "user.email", "bot@shino-imako.local"])
+            target_url = get_database_repo_url()
+            run_git_command(["git", "-C", repo_dir, "remote", "set-url", "origin", target_url])
+    except Exception as e:
+        print(f"[!] Lỗi khi cấu hình Git repository: {e}")
 
 
 def ensure_database_repo() -> str:
@@ -161,23 +180,39 @@ def ensure_database_repo() -> str:
     db_file_path = os.path.join(DATABASE_REPO_DIR, DATABASE_FILENAME)
     clone_url = get_database_repo_url()
     
+    # Cấu hình safe.directory toàn cục
+    run_git_command(["git", "config", "--global", "--add", "safe.directory", "*"])
+
     if not os.path.exists(DATABASE_REPO_DIR):
         print(f"[*] Thư mục repo database chưa tồn tại. Đang clone từ {DATABASE_REPO_URL}...")
         try:
-            subprocess.run(["git", "clone", clone_url, DATABASE_REPO_DIR], check=True)
-            print("[+] Clone database repo thành công!")
-            configure_git_repo(DATABASE_REPO_DIR)
+            res = run_git_command(["git", "clone", clone_url, DATABASE_REPO_DIR])
+            if res.returncode == 0:
+                print("[+] Clone database repo thành công!")
+                configure_git_repo(DATABASE_REPO_DIR)
+            else:
+                err = res.stderr.strip() or res.stdout.strip()
+                print(f"[!] Không thể clone database repo: {err}")
+                print(f"[*] Sẽ sử dụng file cục bộ '{DATABASE_FILENAME}' nếu có.")
+                return DATABASE_FILENAME
         except Exception as e:
             print(f"[!] Không thể clone database repo: {e}")
-            print(f"[*] Sẽ sử dụng file cục bộ '{DATABASE_FILENAME}' nếu có.")
             return DATABASE_FILENAME
     else:
         if os.path.exists(os.path.join(DATABASE_REPO_DIR, ".git")):
             configure_git_repo(DATABASE_REPO_DIR)
             print(f"[*] Đang đồng bộ (git pull) database từ {DATABASE_REPO_URL}...")
             try:
-                subprocess.run(["git", "-C", DATABASE_REPO_DIR, "pull"], check=True)
-                print("[+] Git pull database thành công!")
+                # Sử dụng autostash và rebase để không mất các cập nhật cục bộ
+                pull_res = run_git_command(["git", "-C", DATABASE_REPO_DIR, "pull", "--autostash", "--rebase", "origin", "main"])
+                if pull_res.returncode == 0:
+                    print("[+] Git pull database thành công!")
+                else:
+                    pull_res2 = run_git_command(["git", "-C", DATABASE_REPO_DIR, "pull"])
+                    if pull_res2.returncode == 0:
+                        print("[+] Git pull database thành công!")
+                    else:
+                        print(f"[!] Lỗi khi git pull database: {pull_res.stderr.strip() or pull_res2.stderr.strip()}")
             except Exception as e:
                 print(f"[!] Lỗi khi git pull database repo: {e}")
 
@@ -199,37 +234,48 @@ def git_push_database(commit_message: str):
         print("[-] Thư mục database không phải git repository, bỏ qua git push.")
         return
 
+    github_token = os.getenv("GITHUB_TOKEN", "").strip() or os.getenv("GIT_TOKEN", "").strip()
+    if not github_token and DATABASE_REPO_URL.startswith("https://") and "@" not in DATABASE_REPO_URL:
+        print("[!] CẢNH BÁO GIT PUSH: Bạn chưa cấu hình GITHUB_TOKEN trong file .env!")
+        print("    -> GitHub yêu cầu xác thực để push code. Bot không thể push ẩn danh.")
+        print("    -> Vui lòng tạo Personal Access Token tại https://github.com/settings/tokens (quyền 'repo')")
+        print("    -> Sau đó thêm vào file .env: GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx")
+
     try:
         configure_git_repo(DATABASE_REPO_DIR)
         print(f"[*] Đang commit và push database: '{commit_message}'")
-        subprocess.run(["git", "-C", DATABASE_REPO_DIR, "add", DATABASE_FILENAME], check=True)
-        diff_status = subprocess.run(["git", "-C", DATABASE_REPO_DIR, "diff", "--cached", "--quiet"])
+        run_git_command(["git", "-C", DATABASE_REPO_DIR, "add", DATABASE_FILENAME])
+
+        diff_status = run_git_command(["git", "-C", DATABASE_REPO_DIR, "diff", "--cached", "--quiet"])
         if diff_status.returncode != 0:
-            commit_res = subprocess.run(
-                ["git", "-C", DATABASE_REPO_DIR, "commit", "-m", commit_message],
-                capture_output=True, text=True
+            commit_res = run_git_command(
+                ["git", "-C", DATABASE_REPO_DIR, "commit", "-m", commit_message]
             )
             if commit_res.returncode != 0:
-                print(f"[!] Lỗi khi git commit: {commit_res.stderr.strip()}")
+                print(f"[!] Lỗi khi git commit: {commit_res.stderr.strip() or commit_res.stdout.strip()}")
                 return
 
-            push_res = subprocess.run(
-                ["git", "-C", DATABASE_REPO_DIR, "push", "origin", "main"],
-                capture_output=True, text=True
+            # Tự động rebase từ remote trước khi push để tránh xung đột 'Updates were rejected'
+            run_git_command(["git", "-C", DATABASE_REPO_DIR, "pull", "--rebase", "origin", "main"])
+
+            push_res = run_git_command(
+                ["git", "-C", DATABASE_REPO_DIR, "push", "origin", "main"]
             )
             if push_res.returncode == 0:
                 print("[+] Git push database thành công!")
             else:
-                push_res2 = subprocess.run(
-                    ["git", "-C", DATABASE_REPO_DIR, "push"],
-                    capture_output=True, text=True
+                push_res2 = run_git_command(
+                    ["git", "-C", DATABASE_REPO_DIR, "push"]
                 )
                 if push_res2.returncode == 0:
                     print("[+] Git push database thành công!")
                 else:
-                    err_msg = push_res.stderr.strip() or push_res2.stderr.strip()
+                    err_msg = push_res.stderr.strip() or push_res2.stderr.strip() or push_res.stdout.strip()
                     print(f"[!] Lỗi khi git push database: {err_msg}")
-                    print(f"    >> GỢI Ý: Nếu dùng HTTPS trên VPS, hãy thêm GITHUB_TOKEN=ghp_... vào file .env để tự động cấp quyền push.")
+                    if "could not read Username" in err_msg or "Authentication failed" in err_msg or "Permission to" in err_msg:
+                        print("    >> NGUYÊN NHÂN: Thiếu hoặc sai GITHUB_TOKEN. Hãy điền GITHUB_TOKEN=ghp_... vào .env.")
+                    elif "rejected" in err_msg:
+                        print("    >> NGUYÊN NHÂN: Remote có commit mới hơn. Bot đã thử rebase.")
         else:
             print("[-] Không có thay đổi nào trong database để commit.")
     except Exception as e:
