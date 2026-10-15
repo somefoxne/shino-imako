@@ -92,6 +92,41 @@ def configure_environment(test_mode_override: Optional[bool] = None):
         SESSION.auth = (USERNAME, API_KEY)
 
 
+def danbooru_api_request(method: str, url: str, **kwargs) -> requests.Response:
+    """
+    Gửi request lên Danbooru với cơ chế xử lý lỗi 401 thông minh:
+    - Nếu trả về 401 Unauthorized:
+        + Báo lỗi chi tiết và hướng dẫn kiểm tra API Key
+        + Với GET requests (đọc tags, posts): Tự động thử lại không kèm auth (Public Read) để không bị chặn đọc dữ liệu
+    """
+    timeout = kwargs.pop("timeout", 15)
+    resp = SESSION.request(method, url, timeout=timeout, **kwargs)
+
+    if resp.status_code == 401:
+        print(f"\n[!] LỖI HTTP 401 UNAUTHORIZED TỪ DANBOORU!")
+        print(f"    URL: {url}")
+        print(f"    Tài khoản trong .env: '{USERNAME or '(Rỗng)'}'")
+        error_msg = resp.text.strip().replace("\n", " ")[:200]
+        print(f"    Phản hồi từ server: {error_msg}")
+        print(f"    >> LƯU Ý QUAN TRỌNG:")
+        print(f"       1. Phải dùng API KEY (lấy tại {DANBOORU_HOST}/profile), KHÔNG ĐƯỢC dùng mật khẩu đăng nhập!")
+        print(f"       2. Nếu bật TEST_MODE=on, tài khoản Danbooru thật sẽ KHÔNG hoạt động trên Testbooru (phải tạo tài khoản trên testbooru.donmai.us).")
+        print(f"       3. Kiểm tra xem file .env có chứa ký tự hoặc khoảng trắng thừa không.\n")
+
+        # Với GET request (đọc dữ liệu công khai): Tự động thử lại không kèm auth
+        if method.upper() == "GET" and SESSION.auth:
+            print("[*] Đang tự động thử lại request ở chế độ Khách công khai (không kèm auth)...")
+            headers = dict(SESSION.headers)
+            resp_public = requests.get(url, headers=headers, timeout=timeout, **kwargs)
+            if resp_public.status_code == 200:
+                print("[+] Thành công tải dữ liệu ở chế độ Khách công khai!")
+                return resp_public
+            return resp_public
+
+    return resp
+
+
+
 
 # ==========================================
 # 1. QUẢN LÝ GIT CHO DATABASE REPO
@@ -239,7 +274,7 @@ def fetch_top_copyright_tags(chartag: str, limit: int = 10) -> List[str]:
     }
 
     try:
-        resp = SESSION.get(url, params=params, timeout=15)
+        resp = danbooru_api_request("GET", url, params=params)
         if resp.status_code != 200:
             print(f"[-] Lỗi khi gọi related_tag cho '{chartag}': {resp.status_code}")
             return []
@@ -250,10 +285,11 @@ def fetch_top_copyright_tags(chartag: str, limit: int = 10) -> List[str]:
         # Fallback category=3 nếu cần
         if not related_tags_raw:
             params["category"] = "3"
-            resp2 = SESSION.get(url, params=params, timeout=15)
+            resp2 = danbooru_api_request("GET", url, params=params)
             if resp2.status_code == 200:
                 data = resp2.json()
                 related_tags_raw = data.get("related_tags", [])
+
 
         copytags = []
         for item in related_tags_raw:
@@ -344,10 +380,11 @@ def fetch_character_tags_from_danbooru(
             params["page"] = str(page)
 
         try:
-            resp = SESSION.get(url, params=params, timeout=15)
+            resp = danbooru_api_request("GET", url, params=params)
             if resp.status_code != 200:
                 print(f"[-] Lỗi HTTP {resp.status_code} khi tải tags trang {page}")
                 break
+
 
             tags_data = resp.json()
             if not tags_data or not isinstance(tags_data, list):
@@ -454,9 +491,10 @@ def check_readd_permission(post_id: int, copytag: str, policy: Optional[str] = N
     params = {"search[post_id]": post_id, "limit": 100}
 
     try:
-        resp = SESSION.get(url, params=params, timeout=15)
+        resp = danbooru_api_request("GET", url, params=params)
         if resp.status_code != 200:
             return False, f"HTTP {resp.status_code} khi kiểm tra post_versions"
+
 
         versions = resp.json()
         if not versions:
@@ -539,13 +577,14 @@ def add_copytag_to_post(post_id: int, copytag: str, chartag: str) -> bool:
     }
 
     try:
-        resp = SESSION.put(url, data=data, timeout=15)
+        resp = danbooru_api_request("PUT", url, data=data)
         if resp.status_code == 200:
             print(f"[+] Thành công thêm '{copytag}' vào post #{post_id}")
             return True
         else:
             print(f"[-] Thất bại khi thêm vào post #{post_id}. Mã lỗi: {resp.status_code}, Phản hồi: {resp.text[:200]}")
             return False
+
     except Exception as e:
         print(f"[!] Lỗi khi update post #{post_id}: {e}")
         return False
@@ -593,10 +632,11 @@ def scan_and_apply_copytags():
         params = {"tags": danbooru_query, "limit": 50}
 
         try:
-            resp = SESSION.get(url, params=params, timeout=15)
+            resp = danbooru_api_request("GET", url, params=params)
             if resp.status_code != 200:
                 print(f"[-] Lỗi truy vấn Danbooru cho query '{danbooru_query}': HTTP {resp.status_code}")
                 continue
+
 
             posts = resp.json()
             print(f"  > Tìm thấy {len(posts)} bài đăng.")
