@@ -99,20 +99,37 @@ RE_ADD_POLICY=never
 
 ### Lệnh chạy:
 
-1. **Quét bài đăng theo `data/checkfile.txt`**:
+1. **Khởi động Bot chạy 24/7 (Dành cho Vibe Host / VPS)**:
    ```bash
-   # Chạy theo cấu hình TEST_MODE trong .env:
-   python bot.py --scan
+   python main.py
+   ```
+   *(Tự động chạy chu kỳ quét liên tục và tự động cào khởi tạo tag ban đầu nếu database trống).*
 
-   # Ép buộc chạy trên Testbooru (kết nối testbooru.donmai.us):
-   python bot.py --scan --test
+2. **Cào toàn bộ Character Tags từ Danbooru để cập nhật Git Database**:
+   Lấy danh sách từ `https://danbooru.donmai.us/tags?search[category]=4&search[hide_empty]=yes&search[order]=date`, tự động loại bỏ tag deprecated và tag 0 post, sau đó lấy top 10 copyright tags và push lên Git database:
+   ```bash
+   # Cào toàn bộ (hoặc cào trang đầu):
+   python main.py --crawl-chartags
 
-   # Ép buộc chạy trên Danbooru thật:
-   python bot.py --scan --live
+   # Giới hạn cào 5 trang (mỗi trang 100 tags):
+   python main.py --crawl-chartags --max-pages 5
+
+   # Giới hạn số lượng tag mới cần lấy:
+   python main.py --crawl-chartags --max-tags 200
    ```
 
-2. **Lấy gợi ý copytags mới (category=copyright) và đẩy lên Git database**:
+3. **Cập nhật thủ công các nhân vật cụ thể**:
    ```bash
-   python bot.py --update-db ookami_mio shirakami_fubuki tokino_sora
+   python main.py --update-db ookami_mio shirakami_fubuki tokino_sora
    ```
+
+4. **Chạy quét kiểm tra 1 lần**:
+   ```bash
+   # Chạy 1 lần rồi thoát (không lặp 24/7):
+   python main.py --once
+
+   # Chạy kiểm tra trên Testbooru:
+   python main.py --once --test
+   ```
+
 

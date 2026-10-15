@@ -35,13 +35,22 @@ def run_loop_service(test_mode_override: Optional[bool] = None, run_once: bool =
     print(f"[*] Vòng lặp 24/7    : {'BẬT (Mỗi ' + str(LOOP_INTERVAL) + 's)' if not run_once else 'TẮT (Chạy 1 lần)'}")
     print("=" * 65 + "\n")
 
+    # Kiểm tra nếu database trống hoàn toàn -> tự động lấy character tags ban đầu
+    db_file = bot.ensure_database_repo()
+    app_db, unapp_db = bot.parse_database(db_file)
+    if not app_db and not unapp_db:
+        print("[!] Phát hiện database hoàn toàn trống (0 công thức).")
+        print("[*] Đang tự động cào character tags từ Danbooru để khởi tạo các công thức chờ duyệt...")
+        bot.crawl_and_update_database(max_tags=100, max_pages=1)
+
     cycle_num = 1
     try:
         while True:
-            print(f">>> [CHU KỲ #{cycle_num}] Bắt đầu lúc {time.strftime('%Y-%m-%d %H:%M:%S')} <<<")
+            print(f"\n>>> [CHU KỲ #{cycle_num}] Bắt đầu lúc {time.strftime('%Y-%m-%d %H:%M:%S')} <<<")
             
             # Thực thi quét bài và gắn copytag
             bot.scan_and_apply_copytags()
+
 
             if run_once or not RUN_LOOP_ENV:
                 print("\n[*] Hoàn tất chu kỳ quét đơn (chế độ chạy 1 lần).")
@@ -60,7 +69,10 @@ def run_loop_service(test_mode_override: Optional[bool] = None, run_once: bool =
 def main():
     parser = argparse.ArgumentParser(description="Danbooru Copytag Bot - Shino Imako")
     parser.add_argument("--scan", action="store_true", help="Chạy quét bài đăng theo checkfile.txt")
-    parser.add_argument("--update-db", nargs="+", help="Lấy related copyright tags cho chartag, ghi '?chartag -> ...' và push Git database")
+    parser.add_argument("--update-db", nargs="+", help="Lấy related copyright tags cho chartag cụ thể, ghi '?chartag -> ...' và push Git database")
+    parser.add_argument("--crawl-chartags", action="store_true", help="Cào danh sách character tags từ Danbooru (category=4, hide_empty=yes, order=date) để cập nhật database")
+    parser.add_argument("--max-pages", type=int, default=None, help="Giới hạn số trang cào từ Danbooru (mỗi trang 100 tags)")
+    parser.add_argument("--max-tags", type=int, default=None, help="Giới hạn số lượng character tags mới cần xử lý")
     parser.add_argument("--test", action="store_true", help="Bật chế độ TEST_MODE (Testbooru: https://testbooru.donmai.us)")
     parser.add_argument("--live", action="store_true", help="Chạy chế độ PRODUCTION (Danbooru thật)")
     parser.add_argument("--once", action="store_true", help="Chỉ quét 1 lần rồi thoát (tắt vòng lặp 24/7)")
@@ -73,14 +85,18 @@ def main():
     elif args.live:
         test_override = False
 
-    # Nếu người dùng chạy lệnh update-db
-    if args.update_db:
+    # 1. Nếu chạy cào danh sách character tags từ Danbooru
+    if args.crawl_chartags:
+        bot.configure_environment(test_mode_override=test_override)
+        bot.crawl_and_update_database(max_tags=args.max_tags, max_pages=args.max_pages)
+    # 2. Nếu người dùng chỉ định cụ thể các chartag cần update
+    elif args.update_db:
         bot.configure_environment(test_mode_override=test_override)
         bot.update_database_pipeline(args.update_db)
     else:
-        # Mặc định (khi Vibe Host chạy 'python main.py' không tham số, hoặc khi có cờ --scan):
-        # Tự động chạy chế độ quét liên tục 24/7
+        # Mặc định: Chạy quét bài đăng liên tục 24/7
         run_loop_service(test_mode_override=test_override, run_once=args.once)
+
 
 
 if __name__ == "__main__":
