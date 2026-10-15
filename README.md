@@ -73,29 +73,46 @@ pip install requests
 ### Cấu hình file `.env`:
 Tạo file `.env` (hoặc sao chép từ `.env.example`):
 ```env
-# Discord Token / Webhook
+# ==========================================
+# CHẾ ĐỘ TESTBOORU (TEST_MODE: on / off)
+# ==========================================
+TEST_MODE=off
+TESTBOORU_URL=https://testbooru.donmai.us
+TESTBOORU_USERNAME=your_testbooru_username
+TESTBOORU_API_KEY=your_testbooru_api_key
+
+# ==========================================
+# DANBOORU CHÍNH THỨC (PRODUCTION)
+# ==========================================
+DANBOORU_URL=https://danbooru.donmai.us
+DANBOORU_USERNAME=your_danbooru_username
+DANBOORU_API_KEY=your_danbooru_api_key
+
+# ==========================================
+# DISCORD & CẤU HÌNH KHÁC
+# ==========================================
 DISCORD_TOKEN=your_discord_token_here
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
-
-# Tài khoản Danbooru
-DANBOORU_USERNAME=your_username_here
-DANBOORU_API_KEY=your_api_key_here
-
-# Git Database Repository URL
 DATABASE_REPO_URL=https://github.com/somefoxne/copyright_request_database.git
-
-# Chính sách mặc định khi tag bị xóa (never / số lượt edit)
 RE_ADD_POLICY=never
 ```
 
 ### Lệnh chạy:
 
-1. **Lấy gợi ý copytags mới (category=copyright) và đẩy lên Git database**:
+1. **Quét bài đăng theo `data/checkfile.txt`**:
+   ```bash
+   # Chạy theo cấu hình TEST_MODE trong .env:
+   python bot.py --scan
+
+   # Ép buộc chạy trên Testbooru (kết nối testbooru.donmai.us):
+   python bot.py --scan --test
+
+   # Ép buộc chạy trên Danbooru thật:
+   python bot.py --scan --live
+   ```
+
+2. **Lấy gợi ý copytags mới (category=copyright) và đẩy lên Git database**:
    ```bash
    python bot.py --update-db ookami_mio shirakami_fubuki tokino_sora
    ```
 
-2. **Quét bài đăng theo `data/checkfile.txt` và tự động gắn copytag**:
-   ```bash
-   python bot.py --scan
-   ```

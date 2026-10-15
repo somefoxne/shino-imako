@@ -31,20 +31,12 @@ def load_dotenv(filepath: str = ".env"):
 
 load_dotenv()
 
-DANBOORU_HOST = os.getenv("DANBOORU_URL", "https://danbooru.donmai.us").rstrip("/")
-USERNAME = os.getenv("DANBOORU_USERNAME", "")
-API_KEY = os.getenv("DANBOORU_API_KEY", "")
-
-# Discord
+# Discord & Re-add Policy
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-
-# Chính sách mặc định khi tag bị xóa (never / số lượt edit)
 DEFAULT_READD_POLICY = os.getenv("RE_ADD_POLICY", "never").strip().lower()
 
 # 2 Kho Git riêng biệt:
-# 1. Git bot: https://github.com/somefoxne/shino-imako.git
-# 2. Git database: https://github.com/somefoxne/copyright_request_database.git
 DATABASE_REPO_URL = os.getenv(
     "DATABASE_REPO_URL", 
     "https://github.com/somefoxne/copyright_request_database.git"
@@ -57,10 +49,46 @@ CHECKFILE_PATH = os.path.join("data", "checkfile.txt")
 if not os.path.exists(CHECKFILE_PATH) and os.path.exists("checkfile.txt"):
     CHECKFILE_PATH = "checkfile.txt"
 
+# Biến môi trường kết nối Danbooru / Testbooru
+TEST_MODE = False
+DANBOORU_HOST = "https://danbooru.donmai.us"
+USERNAME = ""
+API_KEY = ""
+
 SESSION = requests.Session()
-if USERNAME and API_KEY:
-    SESSION.auth = (USERNAME, API_KEY)
 SESSION.headers.update({"User-Agent": "ShinoImakoBot/2.0 (by somefoxne)"})
+
+def configure_environment(test_mode_override: Optional[bool] = None):
+    """
+    Cấu hình chế độ hoạt động: Testbooru (TEST_MODE) hoặc Danbooru thật (PRODUCTION)
+    """
+    global TEST_MODE, DANBOORU_HOST, USERNAME, API_KEY, SESSION
+
+    test_mode_env = os.getenv("TEST_MODE", "off").strip().lower() in ("true", "1", "yes", "on")
+    if test_mode_override is not None:
+        TEST_MODE = test_mode_override
+    else:
+        TEST_MODE = test_mode_env
+
+    if TEST_MODE:
+        DANBOORU_HOST = os.getenv("TESTBOORU_URL", "https://testbooru.donmai.us").rstrip("/")
+        USERNAME = os.getenv("TESTBOORU_USERNAME", "") or os.getenv("DANBOORU_USERNAME", "")
+        API_KEY = os.getenv("TESTBOORU_API_KEY", "") or os.getenv("DANBOORU_API_KEY", "")
+        print(f"[!] CHẾ ĐỘ TEST_MODE: [BẬT/ON]")
+        print(f"    -> Đang kết nối tới Testbooru: {DANBOORU_HOST}")
+        print(f"    -> Username: {USERNAME or '(Chưa thiết lập)'}")
+    else:
+        DANBOORU_HOST = os.getenv("DANBOORU_URL", "https://danbooru.donmai.us").rstrip("/")
+        USERNAME = os.getenv("DANBOORU_USERNAME", "")
+        API_KEY = os.getenv("DANBOORU_API_KEY", "")
+        print(f"[*] CHẾ ĐỘ PRODUCTION: [TẮT/OFF]")
+        print(f"    -> Đang kết nối tới Danbooru: {DANBOORU_HOST}")
+        print(f"    -> Username: {USERNAME or '(Chưa thiết lập)'}")
+
+    SESSION.auth = None
+    if USERNAME and API_KEY:
+        SESSION.auth = (USERNAME, API_KEY)
+
 
 
 # ==========================================
@@ -485,8 +513,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Danbooru Copytag Bot - Shino Imako")
     parser.add_argument("--scan", action="store_true", help="Quét bài đăng theo checkfile.txt và đối chiếu database đã duyệt")
     parser.add_argument("--update-db", nargs="+", help="Lấy related copyright tags cho chartag, ghi '?chartag -> ...' và push Git database")
+    parser.add_argument("--test", action="store_true", help="Bật chế độ TEST_MODE (sử dụng Testbooru: https://testbooru.donmai.us)")
+    parser.add_argument("--live", action="store_true", help="Chạy chế độ PRODUCTION (sử dụng Danbooru thật)")
     
     args = parser.parse_args()
+
+    # Xác định chế độ test_mode override từ CLI nếu có
+    test_override = None
+    if args.test:
+        test_override = True
+    elif args.live:
+        test_override = False
+
+    configure_environment(test_mode_override=test_override)
 
     if args.update_db:
         update_database_pipeline(args.update_db)
@@ -494,3 +533,4 @@ if __name__ == "__main__":
         scan_and_apply_copytags()
     else:
         parser.print_help()
+
