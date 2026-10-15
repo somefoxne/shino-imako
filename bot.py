@@ -509,28 +509,7 @@ def scan_and_apply_copytags():
 # CLI ENTRYPOINT
 # ==========================================
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Danbooru Copytag Bot - Shino Imako")
-    parser.add_argument("--scan", action="store_true", help="Quét bài đăng theo checkfile.txt và đối chiếu database đã duyệt")
-    parser.add_argument("--update-db", nargs="+", help="Lấy related copyright tags cho chartag, ghi '?chartag -> ...' và push Git database")
-    parser.add_argument("--test", action="store_true", help="Bật chế độ TEST_MODE (sử dụng Testbooru: https://testbooru.donmai.us)")
-    parser.add_argument("--live", action="store_true", help="Chạy chế độ PRODUCTION (sử dụng Danbooru thật)")
-    
-    args = parser.parse_args()
+    import main
+    main.main()
 
-    # Xác định chế độ test_mode override từ CLI nếu có
-    test_override = None
-    if args.test:
-        test_override = True
-    elif args.live:
-        test_override = False
-
-    configure_environment(test_mode_override=test_override)
-
-    if args.update_db:
-        update_database_pipeline(args.update_db)
-    elif args.scan:
-        scan_and_apply_copytags()
-    else:
-        parser.print_help()
 
