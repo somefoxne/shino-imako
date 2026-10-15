@@ -74,14 +74,20 @@ rem_(re:zero) -> re:zero_kara_hajimeru_isekai_seikatsu
 pip install requests
 ```
 
-### Thiết lập biến môi trường (Khuyên dùng):
-```powershell
-$env:DANBOORU_USERNAME="tên_tài_khoản"
-$env:DANBOORU_API_KEY="api_key_danbooru"
+### Thiết lập file cấu hình `.env`:
+Tạo file `.env` (hoặc sao chép từ `.env.example`):
+```env
+# Discord Token (dùng khi tích hợp bot Discord)
+DISCORD_TOKEN=your_discord_token_here
 
-# Cấu hình URL git database (nếu cần thay đổi)
-$env:DATABASE_REPO_URL="https://github.com/somefoxne/copyright_request_database.git"
+# Tài khoản Danbooru
+DANBOORU_USERNAME=your_username_here
+DANBOORU_API_KEY=your_api_key_here
+
+# Git Database Repository URL (Lấy database và update database)
+DATABASE_REPO_URL=https://github.com/somefoxne/copyright_request_database.git
 ```
+*(File `.env` đã được cấu hình trong `.gitignore` để không bị lộ token lên GitHub).*
 
 ### Lệnh chạy:
 

@@ -6,11 +6,27 @@ import requests
 from typing import Dict, List, Tuple, Optional
 
 # ==========================================
-# CẤU HÌNH (CONFIGURATION)
+# CẤU HÌNH & LOAD .ENV
 # ==========================================
+def load_dotenv(filepath: str = ".env"):
+    """Tự động đọc cấu hình từ file .env nếu có"""
+    if os.path.exists(filepath):
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+
+load_dotenv()
+
 DANBOORU_HOST = "https://danbooru.donmai.us"
 USERNAME = os.getenv("DANBOORU_USERNAME", "")
 API_KEY = os.getenv("DANBOORU_API_KEY", "")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 
 # 2 Kho Git riêng biệt:
 # 1. Git bot: https://github.com/somefoxne/shino-imako.git
@@ -30,6 +46,7 @@ SESSION = requests.Session()
 if USERNAME and API_KEY:
     SESSION.auth = (USERNAME, API_KEY)
 SESSION.headers.update({"User-Agent": "ShinoImakoBot/1.0 (by somefoxne)"})
+
 
 
 # ==========================================
