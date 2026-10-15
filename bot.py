@@ -131,24 +131,49 @@ def danbooru_api_request(method: str, url: str, **kwargs) -> requests.Response:
 # ==========================================
 # 1. QUẢN LÝ GIT CHO DATABASE REPO
 # ==========================================
+def get_database_repo_url() -> str:
+    """Trả về URL repo database, tự động nhúng GITHUB_TOKEN nếu có cấu hình trong .env"""
+    url = DATABASE_REPO_URL
+    github_token = os.getenv("GITHUB_TOKEN", "").strip() or os.getenv("GIT_TOKEN", "").strip()
+    if github_token and url.startswith("https://") and "@" not in url:
+        url = url.replace("https://", f"https://{github_token}@")
+    return url
+
+
+def configure_git_repo(repo_dir: str):
+    """Cấu hình user.name, user.email và remote origin URL cho repository"""
+    if not os.path.exists(os.path.join(repo_dir, ".git")):
+        return
+    try:
+        subprocess.run(["git", "-C", repo_dir, "config", "user.name", "Shino Imako Bot"], check=False)
+        subprocess.run(["git", "-C", repo_dir, "config", "user.email", "bot@shino-imako.local"], check=False)
+        target_url = get_database_repo_url()
+        subprocess.run(["git", "-C", repo_dir, "remote", "set-url", "origin", target_url], check=False)
+    except Exception:
+        pass
+
+
 def ensure_database_repo() -> str:
     """
     Đảm bảo repo database đã được clone và pull mới nhất.
     Trả về đường dẫn tới file database.txt
     """
     db_file_path = os.path.join(DATABASE_REPO_DIR, DATABASE_FILENAME)
+    clone_url = get_database_repo_url()
     
     if not os.path.exists(DATABASE_REPO_DIR):
         print(f"[*] Thư mục repo database chưa tồn tại. Đang clone từ {DATABASE_REPO_URL}...")
         try:
-            subprocess.run(["git", "clone", DATABASE_REPO_URL, DATABASE_REPO_DIR], check=True)
+            subprocess.run(["git", "clone", clone_url, DATABASE_REPO_DIR], check=True)
             print("[+] Clone database repo thành công!")
+            configure_git_repo(DATABASE_REPO_DIR)
         except Exception as e:
             print(f"[!] Không thể clone database repo: {e}")
             print(f"[*] Sẽ sử dụng file cục bộ '{DATABASE_FILENAME}' nếu có.")
             return DATABASE_FILENAME
     else:
         if os.path.exists(os.path.join(DATABASE_REPO_DIR, ".git")):
+            configure_git_repo(DATABASE_REPO_DIR)
             print(f"[*] Đang đồng bộ (git pull) database từ {DATABASE_REPO_URL}...")
             try:
                 subprocess.run(["git", "-C", DATABASE_REPO_DIR, "pull"], check=True)
@@ -175,13 +200,36 @@ def git_push_database(commit_message: str):
         return
 
     try:
+        configure_git_repo(DATABASE_REPO_DIR)
         print(f"[*] Đang commit và push database: '{commit_message}'")
         subprocess.run(["git", "-C", DATABASE_REPO_DIR, "add", DATABASE_FILENAME], check=True)
         diff_status = subprocess.run(["git", "-C", DATABASE_REPO_DIR, "diff", "--cached", "--quiet"])
         if diff_status.returncode != 0:
-            subprocess.run(["git", "-C", DATABASE_REPO_DIR, "commit", "-m", commit_message], check=True)
-            subprocess.run(["git", "-C", DATABASE_REPO_DIR, "push"], check=True)
-            print("[+] Git push database thành công!")
+            commit_res = subprocess.run(
+                ["git", "-C", DATABASE_REPO_DIR, "commit", "-m", commit_message],
+                capture_output=True, text=True
+            )
+            if commit_res.returncode != 0:
+                print(f"[!] Lỗi khi git commit: {commit_res.stderr.strip()}")
+                return
+
+            push_res = subprocess.run(
+                ["git", "-C", DATABASE_REPO_DIR, "push", "origin", "main"],
+                capture_output=True, text=True
+            )
+            if push_res.returncode == 0:
+                print("[+] Git push database thành công!")
+            else:
+                push_res2 = subprocess.run(
+                    ["git", "-C", DATABASE_REPO_DIR, "push"],
+                    capture_output=True, text=True
+                )
+                if push_res2.returncode == 0:
+                    print("[+] Git push database thành công!")
+                else:
+                    err_msg = push_res.stderr.strip() or push_res2.stderr.strip()
+                    print(f"[!] Lỗi khi git push database: {err_msg}")
+                    print(f"    >> GỢI Ý: Nếu dùng HTTPS trên VPS, hãy thêm GITHUB_TOKEN=ghp_... vào file .env để tự động cấp quyền push.")
         else:
             print("[-] Không có thay đổi nào trong database để commit.")
     except Exception as e:
@@ -215,16 +263,18 @@ def parse_database(filepath: str) -> Tuple[Dict[str, str], Dict[str, List[str]]]
                 if "->" in content:
                     left, right = content.split("->", 1)
                     chartag = left.strip()
-                    copytags = right.strip().split()
-                    if chartag:
-                        unapproved_db[chartag] = copytags
+                    # Lọc sạch khoảng trắng và bỏ các token hỏng dạng dict
+                    raw_tags = right.strip().split()
+                    clean_tags = [t for t in raw_tags if not t.startswith("{") and not t.endswith("}") and "'" not in t]
+                    if chartag and clean_tags:
+                        unapproved_db[chartag] = clean_tags
             else:
                 # Dòng đã duyệt: chartag -> copytag
                 if "->" in line:
                     left, right = line.split("->", 1)
                     chartag = left.strip()
                     copytag = right.strip()
-                    if chartag and copytag:
+                    if chartag and copytag and not copytag.startswith("{") and "'" not in copytag:
                         approved_db[chartag] = copytag
 
     return approved_db, unapproved_db
@@ -240,7 +290,11 @@ def update_database_file(filepath: str, chartag: str, top_copytags: List[str]):
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
-    new_entry = f"?{chartag} -> {' '.join(top_copytags)}\n"
+    clean_copytags = [t for t in top_copytags if not t.startswith("{") and not t.endswith("}") and "'" not in t]
+    if not clean_copytags:
+        return
+
+    new_entry = f"?{chartag} -> {' '.join(clean_copytags)}\n"
     found = False
 
     for i, line in enumerate(lines):
@@ -287,20 +341,43 @@ def fetch_top_copyright_tags(chartag: str, limit: int = 10) -> List[str]:
             params["category"] = "3"
             resp2 = danbooru_api_request("GET", url, params=params)
             if resp2.status_code == 200:
-                data = resp2.json()
-                related_tags_raw = data.get("related_tags", [])
-
+                data2 = resp2.json()
+                related_tags_raw = data2.get("related_tags", [])
 
         copytags = []
         for item in related_tags_raw:
-            if isinstance(item, list) and len(item) >= 1:
-                tag_name = item[0]
-            elif isinstance(item, dict) and "name" in item:
-                tag_name = item["name"]
-            else:
-                tag_name = str(item)
+            tag_name = ""
+            is_dep = False
+            cat = None
 
-            if tag_name and tag_name != chartag and tag_name not in copytags:
+            if isinstance(item, dict):
+                # Format Danbooru mới: {'tag': {'name': '...', 'category': 3, 'is_deprecated': False}, 'cosine_similarity': ...}
+                if "tag" in item and isinstance(item["tag"], dict):
+                    t_info = item["tag"]
+                    tag_name = t_info.get("name", "")
+                    is_dep = t_info.get("is_deprecated", False)
+                    cat = t_info.get("category")
+                elif "name" in item:
+                    tag_name = item.get("name", "")
+                    is_dep = item.get("is_deprecated", False)
+                    cat = item.get("category")
+            elif isinstance(item, (list, tuple)) and len(item) >= 1:
+                tag_name = str(item[0])
+            elif isinstance(item, str):
+                tag_name = item
+
+            tag_name = str(tag_name).strip()
+
+            # Bỏ qua nếu rỗng, hoặc là tag bị deprecated
+            if not tag_name or is_dep:
+                continue
+
+            # Đảm bảo là category 3 (copyright) nếu API trả về trường category
+            if cat is not None and cat not in (3, "3", "copyright"):
+                continue
+
+            # Bỏ qua nếu trùng với chính character tag hoặc đã tồn tại trong danh sách
+            if tag_name != chartag and tag_name not in copytags:
                 copytags.append(tag_name)
 
             if len(copytags) >= limit:
