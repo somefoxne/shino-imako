@@ -35,13 +35,10 @@ def run_loop_service(test_mode_override: Optional[bool] = None, run_once: bool =
     print(f"[*] Vòng lặp 24/7    : {'BẬT (Mỗi ' + str(LOOP_INTERVAL) + 's)' if not run_once else 'TẮT (Chạy 1 lần)'}")
     print("=" * 65 + "\n")
 
-    # Kiểm tra nếu database trống hoàn toàn -> tự động lấy character tags ban đầu
+    # Đảm bảo repo database đã được clone/pull mới nhất
     db_file = bot.ensure_database_repo()
-    app_db, unapp_db = bot.parse_database(db_file)
-    if not app_db and not unapp_db:
-        print("[!] Phát hiện database hoàn toàn trống (0 công thức).")
-        print("[*] Đang tự động cào character tags từ Danbooru để khởi tạo các công thức chờ duyệt...")
-        bot.crawl_and_update_database(max_tags=100, max_pages=1)
+    db = bot.parse_database(db_file)
+    print(f"[*] Đã nạp {len(db)} quy tắc nhân vật -> bản quyền từ database.")
 
     cycle_num = 1
     try:

@@ -1,1 +1,16 @@
-
+# ==============================================================================
+# DANBOORU BOT CHECKFILE (RULES GIỚI HẠN PHẠM VI QUÉT)
+# ==============================================================================
+# Các rule dưới đây giúp giới hạn bot chỉ quét các bài đăng cần thiết.
+# Mỗi dòng là một rule (phạm vi tìm kiếm theo cú pháp Danbooru Cheatsheet).
+#
+# Ví dụ:
+#   pool:any -user:spammer Noti:discord readd:5
+#   ookami_mio -hololive Noti:discord
+#   shirakami_fubuki -hololive Noti:discord
+#   asuna_(blue_archive) -blue_archive
+#   status:any
+# ==============================================================================
+pool:any -user:spammer Noti:discord readd:5
+ookami_mio -hololive Noti:discord
+shirakami_fubuki -hololive Noti:discord
