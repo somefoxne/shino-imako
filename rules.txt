@@ -1,5 +1,0 @@
-# File chứa các query/tags cần quét
-# Ví dụ: quét các bài đăng có chứa ookami_mio nhưng thiếu thẻ hololive
-ookami_mio -hololive
-shirakami_fubuki -hololive
-rem_(re:zero) -re:zero_kara_hajimeru_isekai_seikatsu

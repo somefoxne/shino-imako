@@ -1,9 +1,17 @@
 import os
+import sys
 import re
 import json
 import subprocess
 import requests
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
+from checkfile_parser import parse_checkfile, CheckScope
 
 # ==========================================
 # CẤU HÌNH & LOAD .ENV
@@ -23,10 +31,16 @@ def load_dotenv(filepath: str = ".env"):
 
 load_dotenv()
 
-DANBOORU_HOST = "https://danbooru.donmai.us"
+DANBOORU_HOST = os.getenv("DANBOORU_URL", "https://danbooru.donmai.us").rstrip("/")
 USERNAME = os.getenv("DANBOORU_USERNAME", "")
 API_KEY = os.getenv("DANBOORU_API_KEY", "")
+
+# Discord
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
+# Chính sách mặc định khi tag bị xóa (never / số lượt edit)
+DEFAULT_READD_POLICY = os.getenv("RE_ADD_POLICY", "never").strip().lower()
 
 # 2 Kho Git riêng biệt:
 # 1. Git bot: https://github.com/somefoxne/shino-imako.git
@@ -35,18 +49,18 @@ DATABASE_REPO_URL = os.getenv(
     "DATABASE_REPO_URL", 
     "https://github.com/somefoxne/copyright_request_database.git"
 )
-# Thư mục lưu repo database (được clone/pull về máy để bot đọc và cập nhật)
 DATABASE_REPO_DIR = os.getenv("DATABASE_REPO_DIR", "copyright_request_database")
 DATABASE_FILENAME = "database.txt"
 
-# File rules nằm ở repo bot
-RULES_FILE = "rules.txt"
+# File cấu hình phạm vi quét (checkfile.txt)
+CHECKFILE_PATH = os.path.join("data", "checkfile.txt")
+if not os.path.exists(CHECKFILE_PATH) and os.path.exists("checkfile.txt"):
+    CHECKFILE_PATH = "checkfile.txt"
 
 SESSION = requests.Session()
 if USERNAME and API_KEY:
     SESSION.auth = (USERNAME, API_KEY)
-SESSION.headers.update({"User-Agent": "ShinoImakoBot/1.0 (by somefoxne)"})
-
+SESSION.headers.update({"User-Agent": "ShinoImakoBot/2.0 (by somefoxne)"})
 
 
 # ==========================================
@@ -69,7 +83,6 @@ def ensure_database_repo() -> str:
             print(f"[*] Sẽ sử dụng file cục bộ '{DATABASE_FILENAME}' nếu có.")
             return DATABASE_FILENAME
     else:
-        # Nếu đã tồn tại thư mục git, tự động git pull để cập nhật dữ liệu mới nhất
         if os.path.exists(os.path.join(DATABASE_REPO_DIR, ".git")):
             print(f"[*] Đang đồng bộ (git pull) database từ {DATABASE_REPO_URL}...")
             try:
@@ -78,7 +91,6 @@ def ensure_database_repo() -> str:
             except Exception as e:
                 print(f"[!] Lỗi khi git pull database repo: {e}")
 
-    # Nếu file chưa tồn tại trong repo, tạo file mẫu
     if not os.path.exists(db_file_path):
         os.makedirs(DATABASE_REPO_DIR, exist_ok=True)
         with open(db_file_path, "w", encoding="utf-8") as f:
@@ -163,20 +175,17 @@ def update_database_file(filepath: str, chartag: str, top_copytags: List[str]):
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
-    target_pattern = f"?{chartag} ->"
     new_entry = f"?{chartag} -> {' '.join(top_copytags)}\n"
     found = False
 
     for i, line in enumerate(lines):
         stripped = line.strip()
-        # Nếu đã có dòng chưa duyệt của chartag này -> ghi đè cập nhật
         if stripped.startswith("?") and stripped[1:].strip().startswith(f"{chartag} ->"):
             lines[i] = new_entry
             found = True
             break
 
     if not found:
-        # Nếu chưa có -> thêm vào cuối file
         if lines and not lines[-1].endswith("\n"):
             lines[-1] += "\n"
         lines.append(new_entry)
@@ -185,33 +194,15 @@ def update_database_file(filepath: str, chartag: str, top_copytags: List[str]):
         f.writelines(lines)
 
 
-def load_rules(filepath: str = RULES_FILE) -> List[str]:
-    """
-    Đọc rule file chứa danh sách query cần quét
-    """
-    rules = []
-    if not os.path.exists(filepath):
-        return rules
-    with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                rules.append(line)
-    return rules
-
-
 # ==========================================
 # 3. LẤY RELATED TAGS (CHỈ COPYRIGHT TAGS)
 # ==========================================
 def fetch_top_copyright_tags(chartag: str, limit: int = 10) -> List[str]:
     """
     Lấy danh sách related tags với category=copyright (Category 3 trên Danbooru).
-    Đảm bảo kết quả trả về 100% là copytag (không lẫn artist, general, character tags).
     Endpoint: https://danbooru.donmai.us/related_tag.json?query=<chartag>&category=copyright
     """
     url = f"{DANBOORU_HOST}/related_tag.json"
-    
-    # Danbooru API hỗ trợ category='copyright' (hoặc category=3)
     params = {
         "query": chartag,
         "category": "copyright"
@@ -226,7 +217,7 @@ def fetch_top_copyright_tags(chartag: str, limit: int = 10) -> List[str]:
         data = resp.json()
         related_tags_raw = data.get("related_tags", [])
         
-        # Nếu Danbooru trả về rỗng theo param 'copyright', thử fallback param category=3
+        # Fallback category=3 nếu cần
         if not related_tags_raw:
             params["category"] = "3"
             resp2 = SESSION.get(url, params=params, timeout=15)
@@ -236,7 +227,6 @@ def fetch_top_copyright_tags(chartag: str, limit: int = 10) -> List[str]:
 
         copytags = []
         for item in related_tags_raw:
-            # Item có thể là [tag_name, score] hoặc dict
             if isinstance(item, list) and len(item) >= 1:
                 tag_name = item[0]
             elif isinstance(item, dict) and "name" in item:
@@ -259,12 +249,11 @@ def fetch_top_copyright_tags(chartag: str, limit: int = 10) -> List[str]:
 
 def update_database_pipeline(chartags: List[str]):
     """
-    Đưa các chartag vào related_tag (chỉ lấy category copyright, tối đa top 10)
-    Ghi vào file database.txt dạng '?chartag -> copytag1 copytag2 ...'
-    Sau đó tự động commit & push lên Git repository database.
+    Đưa các chartag vào related_tag (category copyright),
+    ghi vào database.txt dạng '?chartag -> copytags...' và tự động push Git database.
     """
     db_file_path = ensure_database_repo()
-    print(f"[*] Đang thực hiện lấy related copyright tags cho {len(chartags)} nhân vật...")
+    print(f"[*] Đang lấy related copyright tags cho {len(chartags)} nhân vật...")
 
     updated_count = 0
     for chartag in chartags:
@@ -287,48 +276,101 @@ def update_database_pipeline(chartags: List[str]):
 
 
 # ==========================================
-# 4. QUÉT POSTS & TỰ ĐỘNG GẮN COPYTAG
+# 4. CHÍNH SÁCH RE-ADD & THÔNG BÁO DISCORD
 # ==========================================
-def has_copytag_ever_been_added(post_id: int, copytag: str) -> bool:
+def check_readd_permission(post_id: int, copytag: str, policy: Optional[str] = None) -> Tuple[bool, str]:
     """
-    Kiểm tra lịch sử post_versions xem copytag đã từng được thêm lần nào chưa.
-    Nếu đã từng có trong lịch sử (kể cả sau đó bị xóa) -> Trả về True (không add lại).
-    Endpoint: https://danbooru.donmai.us/post_versions.json?search[post_id]=<ID>
+    Kiểm tra chính sách Re-add để chống chiến tranh tag (Edit-war):
+    - policy: 'never' (mặc định) hoặc một số nguyên (ví dụ '5' -> cần ít nhất 5 version kể từ lúc bị xóa).
+    - Trả về (allowed, reason)
     """
+    effective_policy = (policy or DEFAULT_READD_POLICY).lower().strip()
     url = f"{DANBOORU_HOST}/post_versions.json"
     params = {"search[post_id]": post_id, "limit": 100}
 
     try:
         resp = SESSION.get(url, params=params, timeout=15)
         if resp.status_code != 200:
-            print(f"[-] Lỗi check post_versions cho post #{post_id}: HTTP {resp.status_code}")
-            return True  # An toàn: nếu không check được thì coi như đã add để tránh duplicate edit
+            return False, f"HTTP {resp.status_code} khi kiểm tra post_versions"
 
         versions = resp.json()
-        for v in versions:
-            added_tags = v.get("added_tags", [])
-            if copytag in added_tags:
-                return True
-            tags_str = v.get("tags", "")
-            if copytag in tags_str.split():
-                return True
+        if not versions:
+            return True, "Chưa có lịch sử versions, cho phép add"
 
-        return False
+        # Sắp xếp version mới nhất lên đầu
+        versions = sorted(versions, key=lambda x: x.get("version", 0), reverse=True)
+        latest_version = versions[0].get("version", 1)
+
+        ever_had_tag = False
+        last_version_with_tag = None
+
+        for v in versions:
+            tags = v.get("tags", "").split()
+            v_num = v.get("version", 0)
+            if copytag in tags:
+                ever_had_tag = True
+                if last_version_with_tag is None or v_num > last_version_with_tag:
+                    last_version_with_tag = v_num
+
+        # Nếu chưa từng có trong lịch sử -> Thoải mái thêm
+        if not ever_had_tag:
+            return True, "Chưa từng có tag trong lịch sử"
+
+        # Nếu từng có nhưng đã bị xóa khỏi post hiện tại:
+        if effective_policy == "never":
+            return False, "Tag từng có và bị xóa; chính sách là 'readd:never'"
+
+        # Nếu chính sách là số nguyên (ví dụ: readd:5)
+        if effective_policy.isdigit():
+            min_versions = int(effective_policy)
+            # Khoảng cách giữa version hiện tại và version cuối cùng còn giữ tag
+            version_diff = latest_version - (last_version_with_tag or latest_version)
+            if version_diff >= min_versions:
+                return True, f"Cho phép re-add sau {version_diff} versions (yêu cầu >= {min_versions})"
+            else:
+                return False, f"Chặn re-add: Mới qua {version_diff}/{min_versions} versions kể từ khi bị xóa"
+
+        return False, f"Chính sách không hợp lệ ({effective_policy}), mặc định từ chối"
+
     except Exception as e:
-        print(f"[!] Lỗi khi gọi post_versions cho post #{post_id}: {e}")
-        return True
+        return False, f"Lỗi ngoại lệ khi kiểm tra history: {e}"
+
+
+def send_discord_notification(post_id: int, chartag: str, copytag: str, post_data: Dict[str, Any]):
+    """
+    Gửi thông báo kết quả cập nhật lên Discord qua Webhook hoặc Bot Token
+    """
+    if not DISCORD_WEBHOOK_URL:
+        return
+
+    post_url = f"{DANBOORU_HOST}/posts/{post_id}"
+    preview_url = post_data.get("preview_file_url") or post_data.get("large_file_url") or ""
+
+    embed = {
+        "title": f"🏷️ Đã gán Copytag vào Post #{post_id}",
+        "url": post_url,
+        "color": 3066993, # Xanh ngọc
+        "fields": [
+            {"name": "Nhân vật (Character)", "value": f"`{chartag}`", "inline": True},
+            {"name": "Bản quyền (Copyright)", "value": f"`{copytag}`", "inline": True},
+        ],
+        "footer": {"text": "Shino Imako Copytag Bot"}
+    }
+    if preview_url:
+        embed["thumbnail"] = {"url": preview_url}
+
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=10)
+    except Exception as e:
+        print(f"[!] Không thể gửi Discord Webhook: {e}")
 
 
 def add_copytag_to_post(post_id: int, copytag: str, chartag: str) -> bool:
-    """
-    Thực hiện thêm copytag vào post qua Danbooru API:
-    PUT /posts/<post_id>.json
-    post[tag_string_diff]=+<copytag>
-    """
+    """Thực hiện gọi API Danbooru thêm copytag vào post"""
     url = f"{DANBOORU_HOST}/posts/{post_id}.json"
     data = {
         "post[tag_string_diff]": f"+{copytag}",
-        "post[edit_reason]": f"Auto add copytag: {chartag} -> {copytag}"
+        "post[edit_reason]": f"[Bot] Auto add copyright: {chartag} -> {copytag}"
     }
 
     try:
@@ -344,65 +386,95 @@ def add_copytag_to_post(post_id: int, copytag: str, chartag: str) -> bool:
         return False
 
 
+# ==========================================
+# 5. CƠ CHẾ QUÉT THEO CHECKFILE (DANBOORU SCOPES)
+# ==========================================
 def scan_and_apply_copytags():
     """
-    Cơ chế quét:
-    1. Pull git database mới nhất
-    2. Đọc các công thức ĐÃ DUYỆT (dòng không có '?') từ database.txt
-    3. Đọc rule file (rules.txt)
-    4. Tìm bài đăng -> kiểm tra lịch sử -> thêm nếu chưa từng add lần nào
+    Quét theo checkfile.txt:
+    1. Git pull database mới nhất
+    2. Đọc các công thức ĐÃ DUYỆT (dòng không có '?')
+    3. Phân tích các Scope từ checkfile.txt (hỗ trợ đầy đủ cú pháp Danbooru Cheatsheet, Noti, readd)
+    4. Tìm bài đăng -> Kiểm tra loại trừ (-tag, -user) -> Kiểm tra Re-add policy -> Thêm tag
     """
     db_file_path = ensure_database_repo()
     approved_db, unapproved_db = parse_database(db_file_path)
-    rules = load_rules()
 
     print(f"[*] Đã tải {len(approved_db)} công thức ĐÃ DUYỆT từ database.")
     print(f"[*] (Có {len(unapproved_db)} công thức CHƯA DUYỆT đang chờ kiểm tra).")
 
     if not approved_db:
-        print("[!] Không có công thức đã duyệt nào trong database. Vui lòng duyệt các dòng có '?' trước!")
+        print("[!] Database chưa có công thức nào được duyệt! Hãy duyệt các dòng có dấu '?' trước.")
         return
 
-    if not rules:
-        print("[!] File rules.txt trống. Vui lòng thêm các tag/query cần quét vào rules.txt!")
+    if not os.path.exists(CHECKFILE_PATH):
+        print(f"[!] Không tìm thấy file {CHECKFILE_PATH}. Vui lòng tạo file này để chạy bot.")
         return
 
-    print(f"[*] Bắt đầu quét {len(rules)} rule(s)...")
+    scopes = parse_checkfile(CHECKFILE_PATH)
+    if not scopes:
+        print(f"[!] File {CHECKFILE_PATH} không có dòng scope hợp lệ nào.")
+        return
 
-    for rule in rules:
-        print(f"\n[===] Đang quét rule: '{rule}'")
+    print(f"[*] Đã nạp {len(scopes)} phạm vi quét (scopes) từ {CHECKFILE_PATH}\n")
+
+    for idx, scope in enumerate(scopes, 1):
+        danbooru_query = scope.build_danbooru_query()
+        print(f"[=== Scope #{idx} ===] Query: '{danbooru_query}'")
+        print(f"  > Thông báo: {list(scope.notis) if scope.notis else 'Mặc định'}")
+        print(f"  > Re-add policy: {scope.readd_policy or DEFAULT_READD_POLICY}")
+
         url = f"{DANBOORU_HOST}/posts.json"
-        params = {"tags": rule, "limit": 50}
+        params = {"tags": danbooru_query, "limit": 50}
 
         try:
             resp = SESSION.get(url, params=params, timeout=15)
             if resp.status_code != 200:
-                print(f"[-] Lỗi query Danbooru cho rule '{rule}': {resp.status_code}")
+                print(f"[-] Lỗi truy vấn Danbooru cho query '{danbooru_query}': HTTP {resp.status_code}")
                 continue
 
             posts = resp.json()
-            print(f"[*] Tìm thấy {len(posts)} bài đăng.")
+            print(f"  > Tìm thấy {len(posts)} bài đăng.")
 
             for post in posts:
                 post_id = post.get("id")
+                
+                # 1. Kiểm tra an toàn bộ lọc loại trừ client-side (-tag, -user:...)
+                if not scope.matches_post(post):
+                    continue
+
                 current_tags = post.get("tag_string", "").split()
 
-                # Đối chiếu với danh sách đã duyệt (chartag -> copytag)
+                # 2. Đối chiếu với các công thức đã duyệt trong database
                 for chartag, copytag in approved_db.items():
                     if chartag in current_tags:
-                        # Nếu post hiện tại đã có copytag này rồi -> bỏ qua
+                        # Đã có sẵn tag này trên bài đăng -> Bỏ qua
                         if copytag in current_tags:
                             continue
 
-                        print(f"[*] Post #{post_id} có '{chartag}' nhưng thiếu '{copytag}'. Đang kiểm tra lịch sử...")
-                        if has_copytag_ever_been_added(post_id, copytag):
-                            print(f"    -> [Bỏ qua] Post #{post_id} đã từng có/từng được add '{copytag}' trước đây.")
-                        else:
-                            print(f"    -> [Thêm] Chưa từng add lần nào. Tiến hành thêm '{copytag}'...")
-                            add_copytag_to_post(post_id, copytag, chartag)
+                        print(f"  [*] Post #{post_id} chứa '{chartag}' nhưng thiếu '{copytag}'.")
+
+                        # 3. Kiểm tra chính sách Re-add chống edit-war
+                        allowed, reason = check_readd_permission(post_id, copytag, policy=scope.readd_policy)
+                        if not allowed:
+                            print(f"      [BỎ QUA] Post #{post_id} -> {reason}")
+                            continue
+
+                        # 4. Kiểm tra Noti:ask (nếu yêu cầu duyệt)
+                        if scope.should_ask():
+                            print(f"      [NOTI:ASK] Bỏ qua chờ duyệt tự động cho Post #{post_id}")
+                            continue
+
+                        # 5. Tiến hành thêm tag
+                        print(f"      [THÊM TAG] Hợp lệ! Đang gắn '{copytag}' vào Post #{post_id}...")
+                        success = add_copytag_to_post(post_id, copytag, chartag)
+
+                        # 6. Gửi thông báo Discord nếu có cờ Noti:discord
+                        if success and scope.should_notify_discord():
+                            send_discord_notification(post_id, chartag, copytag, post)
 
         except Exception as e:
-            print(f"[!] Lỗi khi quét rule '{rule}': {e}")
+            print(f"[!] Lỗi khi xử lý scope #{idx}: {e}")
 
 
 # ==========================================
@@ -411,7 +483,7 @@ def scan_and_apply_copytags():
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Danbooru Copytag Bot - Shino Imako")
-    parser.add_argument("--scan", action="store_true", help="Quét bài đăng theo rules và đối chiếu database đã duyệt")
+    parser.add_argument("--scan", action="store_true", help="Quét bài đăng theo checkfile.txt và đối chiếu database đã duyệt")
     parser.add_argument("--update-db", nargs="+", help="Lấy related copyright tags cho chartag, ghi '?chartag -> ...' và push Git database")
     
     args = parser.parse_args()

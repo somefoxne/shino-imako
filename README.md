@@ -1,6 +1,6 @@
 # Danbooru Copytag Bot - Shino Imako
 
-Hệ thống bot tự động gắn `copytag` (thẻ bản quyền/nhóm) cho các bài đăng Danbooru theo rule đã duyệt, và tự động thu thập đề xuất bản quyền từ `related_tag` để chờ người kiểm duyệt.
+Hệ thống bot tự động gắn `copytag` (thẻ bản quyền/nhóm) cho các bài đăng Danbooru theo database đã duyệt, và tự động thu thập đề xuất bản quyền từ `related_tag` để chờ người kiểm duyệt.
 
 ---
 
@@ -10,60 +10,56 @@ Dự án được chia tách thành 2 kho Git độc lập:
 
 1. **Git Bot (Mã nguồn thực thi)**:
    - URL: `https://github.com/somefoxne/shino-imako.git`
-   - Chứa: Mã nguồn bot (`bot.py`), danh sách rules quét (`rules.txt`), cấu hình, tài liệu.
+   - Chứa: Mã nguồn bot (`bot.py`), bộ phân tích phạm vi quét (`checkfile_parser.py`), file phạm vi quét (`data/checkfile.txt`), tài liệu và cấu hình.
 
 2. **Git Database (Lưu trữ dữ liệu & Kiểm duyệt)**:
    - URL: `https://github.com/somefoxne/copyright_request_database.git`
-   - Chứa: File `database.txt` lưu toàn bộ công thức tag đã duyệt và chờ duyệt.
-   - Khi bot chạy, bot tự động `git pull` để lấy dữ liệu mới nhất, hoặc `git push` khi có tag mới được tạo.
+   - Chứa duy nhất file `database.txt` lưu toàn bộ công thức tag đã duyệt và chờ duyệt.
 
 ---
 
-## 2. Cấu trúc File `database.txt`
-
-Cả 2 loại công thức (đã duyệt & chưa duyệt) được gộp chung trong 1 file duy nhất:
+## 2. Cấu trúc File `database.txt` (Tại git database)
 
 ```text
 # --- CÁC DÒNG ĐÃ ĐƯỢC DUYỆT (Không có dấu '?' ở đầu) ---
-# Format: chartag -> copytag (chỉ 1 copytag chuẩn duy nhất)
+# Format: chartag -> copytag
 ookami_mio -> hololive
 shirakami_fubuki -> hololive
 rem_(re:zero) -> re:zero_kara_hajimeru_isekai_seikatsu
 
 # --- CÁC DÒNG CHƯA ĐƯỢC DUYỆT (Bắt đầu bằng dấu '?') ---
-# Format: ?chartag -> copytag1 copytag2 copytag3 ... (top copyright tags)
+# Format: ?chartag -> copytag1 copytag2 copytag3 ...
 ?ookami_mio -> hololive hololive_gamers cover_corp
 ?tokino_sora -> hololive cover_corp
 ```
 
-### Cách người kiểm duyệt duyệt tag:
-- Tìm các dòng bắt đầu bằng `?` (dễ dàng tìm kiếm/grep trong editor hoặc Git).
-- Xóa dấu `?` ở đầu dòng.
-- Chọn lại 1 `copytag` chuẩn xác nhất và xóa các tag còn lại.
-- Lưu lại và commit lên git repo database.
-
 ---
 
-## 3. Cơ chế hoạt động của Bot
+## 3. Cấu trúc `data/checkfile.txt` (Phạm vi quét)
 
-### Cơ chế 1: Cập nhật Database (`--update-db <chartags...>`)
-1. Tự động đồng bộ git repo database (`git pull`).
-2. Gửi request đến Danbooru API:
-   `https://danbooru.donmai.us/related_tag.json?query=chartag&category=copyright`
-   *(Chỉ lấy thẻ thuộc category **copyright**, đảm bảo 100% trả về là copytag).*
-3. Lấy tối đa **top 10** copyright tags liên quan.
-4. Ghi hoặc cập nhật dòng `?chartag -> copytag1 copytag2 ...` vào `database.txt`.
-5. Tự động `git commit` và `git push` lên repository `copyright_request_database`.
+Mỗi dòng trong `data/checkfile.txt` đại diện cho một kịch bản quét độc lập:
 
-### Cơ chế 2: Quét bài đăng & Tự động gắn Copytag (`--scan`)
-1. Tự động đồng bộ git repo database (`git pull`).
-2. Đọc các công thức **đã duyệt** (các dòng **không có dấu `?`**).
-3. Đọc query cần quét từ `rules.txt` (ví dụ: `ookami_mio -hololive`).
-4. Gọi API `/posts.json` để tìm danh sách bài đăng.
-5. Với mỗi bài đăng có chứa `chartag`:
-   - Gọi `/post_versions.json?search[post_id]=<ID>` để kiểm tra toàn bộ lịch sử chỉnh sửa.
-   - **Nếu copytag đã từng xuất hiện hoặc từng được add trong lịch sử**: Bỏ qua (không add lại để tránh lặp hoặc vi phạm chỉnh sửa).
-   - **Nếu chưa từng add lần nào**: Gọi `PUT /posts/<ID>.json` với `+copytag` để tự động thêm tag bản quyền vào bài viết.
+```text
+# Hỗ trợ toàn bộ cú pháp Danbooru Cheatsheet:
+# id:<số>, pool:<số>, pool:any, user:<tên>, rating:s/g/q/e, tag_name
+# Loại trừ bằng dấu trừ (-): -user:<tên>, -tag_name, -pool:<số>
+
+# 1. Quét theo tag và gửi thông báo Discord:
+ookami_mio -hololive Noti:discord
+
+# 2. Quét tất cả bài trong pool trừ spammer, yêu cầu duyệt qua Discord, cho phép add lại sau 5 lượt sửa:
+pool:any -user:spammer Noti:ask Noti:discord readd:5
+
+# 3. Quét post của artist cụ thể, không bao giờ add lại nếu tag bị xóa:
+user:artist_name Noti:discord readd:never
+```
+
+### Các chỉ thị hỗ trợ trong dòng quét:
+- **`Noti:discord`**: Tự động gửi thông báo kết quả cập nhật kèm thumbnail vào Discord.
+- **`Noti:ask`**: Gửi yêu cầu hỏi duyệt trên Discord trước khi thêm.
+- **`readd:never`** *(Mặc định)*: Nếu tag từng có trong lịch sử mà bị xóa $\rightarrow$ Không bao giờ gắn lại.
+- **`readd:<số>`** (vd `readd:5`): Chỉ cho phép gắn lại nếu đã trải qua ít nhất `<số>` lượt sửa (versions) sau khi bị xóa.
+*(Lưu ý: Không cần chỉ thị `action:` vì bot chỉ chuyên xử lý duy nhất 1 nhiệm vụ gắn copytag).*
 
 ---
 
@@ -74,29 +70,32 @@ rem_(re:zero) -> re:zero_kara_hajimeru_isekai_seikatsu
 pip install requests
 ```
 
-### Thiết lập file cấu hình `.env`:
+### Cấu hình file `.env`:
 Tạo file `.env` (hoặc sao chép từ `.env.example`):
 ```env
-# Discord Token (dùng khi tích hợp bot Discord)
+# Discord Token / Webhook
 DISCORD_TOKEN=your_discord_token_here
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 
 # Tài khoản Danbooru
 DANBOORU_USERNAME=your_username_here
 DANBOORU_API_KEY=your_api_key_here
 
-# Git Database Repository URL (Lấy database và update database)
+# Git Database Repository URL
 DATABASE_REPO_URL=https://github.com/somefoxne/copyright_request_database.git
+
+# Chính sách mặc định khi tag bị xóa (never / số lượt edit)
+RE_ADD_POLICY=never
 ```
-*(File `.env` đã được cấu hình trong `.gitignore` để không bị lộ token lên GitHub).*
 
 ### Lệnh chạy:
 
-1. **Lấy gợi ý copytags mới và đẩy lên Git database**:
+1. **Lấy gợi ý copytags mới (category=copyright) và đẩy lên Git database**:
    ```bash
    python bot.py --update-db ookami_mio shirakami_fubuki tokino_sora
    ```
 
-2. **Chạy quét bài và tự động gắn copytag đã duyệt**:
+2. **Quét bài đăng theo `data/checkfile.txt` và tự động gắn copytag**:
    ```bash
    python bot.py --scan
    ```
