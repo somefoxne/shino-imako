@@ -37,8 +37,8 @@ def run_loop_service(test_mode_override: Optional[bool] = None, run_once: bool =
 
     # Đảm bảo repo database đã được clone/pull mới nhất
     db_file = bot.ensure_database_repo()
-    db = bot.parse_database(db_file)
-    print(f"[*] Đã nạp {len(db)} quy tắc nhân vật -> bản quyền từ database.")
+    approved_db, unapproved_db = bot.parse_database(db_file)
+    print(f"[*] Database: {len(approved_db)} quy tắc ĐÃ DUYỆT, {len(unapproved_db)} quy tắc CHƯA DUYỆT.")
 
     cycle_num = 1
     try:

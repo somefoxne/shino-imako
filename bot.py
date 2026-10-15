@@ -237,19 +237,22 @@ def git_push_database(commit_message: str):
 
 
 # ==========================================
-# 2. XỬ LÝ ĐỌC/GHI FILE DATABASE
 # ==========================================
-def parse_database(filepath: str) -> Dict[str, str]:
+# 2. XỬ LÝ ĐỌC/GHI FILE DATABASE & CƠ CHẾ DUYỆT
+# ==========================================
+def parse_database(filepath: str) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
     """
-    Đọc file database.txt và trả về từ điển ánh xạ:
-    chartag -> primary_copytag (tag bản quyền đầu tiên/chính xác nhất)
-    Hỗ trợ cả dòng có hoặc không có dấu '?' ở đầu:
-      - chartag -> copytag1 copytag2 ...
-      - ?chartag -> copytag1 copytag2 ...
+    Đọc file database.txt và phân loại rõ ràng:
+    1. approved_db: Dòng KHÔNG có dấu ? -> ĐÃ DUYỆT (chartag -> copytag)
+       -> Chỉ các quy tắc này mới được bot dùng để tự động gán vào bài đăng.
+    2. unapproved_db: Dòng CÓ dấu ? -> CHỜ DUYỆT (?chartag -> copytag1 copytag2 ...)
+       -> Chứa các gợi ý do crawler cào về, chờ xem xét duyệt trước khi áp dụng.
     """
-    db = {}
+    approved_db = {}
+    unapproved_db = {}
+
     if not os.path.exists(filepath):
-        return db
+        return approved_db, unapproved_db
 
     with open(filepath, "r", encoding="utf-8") as f:
         for line in f:
@@ -257,27 +260,34 @@ def parse_database(filepath: str) -> Dict[str, str]:
             if not line or line.startswith("#"):
                 continue
 
-            # Tự động bỏ qua dấu '?' nếu có ở đầu dòng
             if line.startswith("?"):
-                line = line[1:].strip()
+                # Dòng chờ duyệt: ?chartag -> copytag1 copytag2 ...
+                content = line[1:].strip()
+                if "->" in content:
+                    left, right = content.split("->", 1)
+                    chartag = left.strip()
+                    raw_tags = right.strip().split()
+                    clean_tags = [t for t in raw_tags if not t.startswith("{") and not t.endswith("}") and "'" not in t]
+                    if chartag and clean_tags:
+                        unapproved_db[chartag] = clean_tags
+            else:
+                # Dòng đã duyệt: chartag -> copytag
+                if "->" in line:
+                    left, right = line.split("->", 1)
+                    chartag = left.strip()
+                    raw_tags = right.strip().split()
+                    clean_tags = [t for t in raw_tags if not t.startswith("{") and not t.endswith("}") and "'" not in t]
+                    if chartag and clean_tags:
+                        approved_db[chartag] = clean_tags[0]
 
-            if "->" in line:
-                left, right = line.split("->", 1)
-                chartag = left.strip()
-                # Lọc sạch khoảng trắng và bỏ các token hỏng dạng dict nếu có
-                raw_tags = right.strip().split()
-                clean_tags = [t for t in raw_tags if not t.startswith("{") and not t.endswith("}") and "'" not in t]
-                if chartag and clean_tags:
-                    # Tag bản quyền đầu tiên là tag chính
-                    db[chartag] = clean_tags[0]
-
-    return db
+    return approved_db, unapproved_db
 
 
-def update_database_file(filepath: str, chartag: str, top_copytags: List[str]):
+def update_database_file(filepath: str, chartag: str, top_copytags: List[str], approved: bool = False):
     """
     Cập nhật hoặc thêm quy tắc nhân vật -> bản quyền vào file database.txt:
-    chartag -> copytag
+    - approved=False: ghi dạng chờ duyệt '?chartag -> copytag1 copytag2 ...'
+    - approved=True : ghi dạng đã duyệt 'chartag -> copytag'
     """
     lines = []
     if os.path.exists(filepath):
@@ -288,16 +298,20 @@ def update_database_file(filepath: str, chartag: str, top_copytags: List[str]):
     if not clean_copytags:
         return
 
-    # Lấy tag bản quyền hàng đầu chính xác nhất
-    primary_copytag = clean_copytags[0]
-    new_entry = f"{chartag} -> {primary_copytag}\n"
-    found = False
+    if approved:
+        new_entry = f"{chartag} -> {clean_copytags[0]}\n"
+    else:
+        new_entry = f"?{chartag} -> {' '.join(clean_copytags)}\n"
 
+    found = False
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith("?"):
-            stripped = stripped[1:].strip()
-        if stripped.startswith(f"{chartag} ->"):
+        core = stripped[1:].strip() if stripped.startswith("?") else stripped
+        if core.startswith(f"{chartag} ->"):
+            # Nếu dòng hiện tại đã duyệt và dòng mới là chưa duyệt -> Không ghi đè lùi
+            if not stripped.startswith("?") and not approved:
+                found = True
+                break
             lines[i] = new_entry
             found = True
             break
@@ -502,11 +516,12 @@ def crawl_and_update_database(max_tags: Optional[int] = None, max_pages: Optiona
     """
     Thu thập character tags từ Danbooru KHÔNG GIỚI HẠN:
     Duyệt qua tất cả các trang -> lấy related copyright tags -> lưu vào database.txt -> tự động push Git theo từng batch.
+    Mọi quy tắc cào tự động đều lưu dưới dạng CHỜ DUYỆT (?chartag -> copytags...) để người quản trị kiểm duyệt.
     """
     db_file_path = ensure_database_repo()
-    existing_db = parse_database(db_file_path)
-    existing_chartags = set(existing_db.keys())
-    print(f"[*] Database hiện có: {len(existing_chartags)} nhân vật đã nạp.")
+    approved_db, unapproved_db = parse_database(db_file_path)
+    existing_chartags = set(approved_db.keys()) | set(unapproved_db.keys())
+    print(f"[*] Database hiện có: {len(approved_db)} đã duyệt, {len(unapproved_db)} chưa duyệt.")
 
     url = f"{DANBOORU_HOST}/tags.json"
     page = 1
@@ -567,8 +582,9 @@ def crawl_and_update_database(max_tags: Optional[int] = None, max_pages: Optiona
             for ch in page_new_tags:
                 top_tags = fetch_top_copyright_tags(ch, limit=10)
                 if top_tags:
-                    print(f"    [{total_new_added + 1}] {ch} -> {' '.join(top_tags)}")
-                    update_database_file(db_file_path, ch, top_tags)
+                    print(f"    [{total_new_added + 1}] ?{ch} -> {' '.join(top_tags)}")
+                    update_database_file(db_file_path, ch, top_tags, approved=False)
+                    unapproved_db[ch] = top_tags
                     total_new_added += 1
                     batch_count += 1
                 else:
@@ -578,7 +594,7 @@ def crawl_and_update_database(max_tags: Optional[int] = None, max_pages: Optiona
 
                 # Push Git theo từng batch
                 if batch_count >= batch_push_size:
-                    git_push_database(f"Auto-crawl add {batch_count} copyright rules (Total: {len(existing_chartags)})")
+                    git_push_database(f"Auto-crawl add {batch_count} copyright candidates (Total: {len(existing_chartags)})")
                     batch_count = 0
 
                 if max_tags and total_new_added >= max_tags:
@@ -603,7 +619,7 @@ def crawl_and_update_database(max_tags: Optional[int] = None, max_pages: Optiona
 
     # Push phần còn lại nếu có
     if batch_count > 0:
-        git_push_database(f"Auto-crawl add final {batch_count} copyright rules (Total: {len(existing_chartags)})")
+        git_push_database(f"Auto-crawl add final {batch_count} copyright candidates (Total: {len(existing_chartags)})")
 
     print(f"\n[+] Hoàn tất! Đã thêm {total_new_added} nhân vật mới vào database và đẩy lên Git.")
 
@@ -730,13 +746,21 @@ def scan_and_apply_copytags():
     Quét bài đăng theo các rule trong data/checkfile.txt:
     - Rule (trong checkfile.txt): dùng để giới hạn bot không quét các post chưa cần quét.
     - Database (trong copyright_request_database): từ điển ánh xạ chartag -> copytag.
-    Đối với mỗi post thỏa mãn rule:
-    Kiểm tra xem post có nhân vật nào thiếu copytag không, nếu thiếu thì tự động thêm.
+    
+    NGUYÊN TẮC DUYỆT BẢO VỆ:
+    - Chỉ các quy tắc ĐÃ DUYỆT (không có '?') mới được phép tự động gán vào bài đăng Danbooru.
+    - Các nhân vật mới phát hiện sẽ được tự động ghi vào database dưới dạng CHỜ DUYỆT (?chartag -> ...) và đẩy lên Git để người quản trị xem xét.
     """
     db_file_path = ensure_database_repo()
-    db = parse_database(db_file_path)
+    approved_db, unapproved_db = parse_database(db_file_path)
 
-    print(f"[*] Đã tải {len(db)} quy tắc nhân vật -> bản quyền từ database.")
+    print(f"[*] Đã tải {len(approved_db)} công thức ĐÃ DUYỆT từ database.")
+    if unapproved_db:
+        print(f"[*] (Có {len(unapproved_db)} công thức CHƯA DUYỆT đang chờ kiểm tra).")
+
+    if not approved_db:
+        print("[!] Chú ý: Chưa có công thức nào được DUYỆT trong database (chỉ có công thức chờ duyệt hoặc database trống).")
+        print("[*] Bot sẽ quét các bài đăng để phát hiện nhân vật mới và tự động cập nhật công thức chờ duyệt '?chartag' lên Git...")
 
     if not os.path.exists(CHECKFILE_PATH):
         print(f"[!] Không tìm thấy file {CHECKFILE_PATH}. Vui lòng tạo file này để chạy bot.")
@@ -787,50 +811,53 @@ def scan_and_apply_copytags():
                 char_tag_string = post.get("tag_string_character", "")
                 character_tags = char_tag_string.split() if char_tag_string else []
 
-                # Nếu tag_string_character rỗng, tìm các tag trong post mà có trong db
+                # Nếu tag_string_character rỗng, tìm các tag trong post mà có trong approved_db
                 if not character_tags:
-                    character_tags = [t for t in current_tags if t in db]
+                    character_tags = [t for t in current_tags if t in approved_db]
 
                 for ch in character_tags:
-                    # 2. Nếu nhân vật này chưa có trong database -> Tự động tìm copytag và cập nhật database
-                    if ch not in db:
-                        print(f"  [*] Post #{post_id}: Phát hiện character tag '{ch}' chưa có trong database.")
-                        top_tags = fetch_top_copyright_tags(ch, limit=10)
-                        if top_tags:
-                            copytag = top_tags[0]
-                            db[ch] = copytag
-                            update_database_file(db_file_path, ch, top_tags)
-                            print(f"      -> Tự động lưu database: {ch} -> {copytag}")
-                            git_push_database(f"Auto-add copyright mapping: {ch} -> {copytag}")
-                        else:
-                            continue
+                    # 2. Xử lý nhân vật chưa được DUYỆT
+                    if ch not in approved_db:
+                        if ch not in unapproved_db:
+                            print(f"  [*] Post #{post_id}: Phát hiện character tag '{ch}' chưa có trong database.")
+                            top_tags = fetch_top_copyright_tags(ch, limit=10)
+                            if top_tags:
+                                unapproved_db[ch] = top_tags
+                                update_database_file(db_file_path, ch, top_tags, approved=False)
+                                print(f"      -> Tự động lưu database chờ duyệt: ?{ch} -> {' '.join(top_tags)}")
+                                git_push_database(f"Discovered new candidate: ?{ch} -> {' '.join(top_tags)}")
+                            else:
+                                unapproved_db[ch] = []
+                        # Không gắn vào post vì quy tắc chưa được duyệt
+                        continue
 
-                    copytag = db.get(ch)
+                    # 3. Nhân vật đã được DUYỆT trong approved_db
+                    copytag = approved_db.get(ch)
                     if not copytag:
                         continue
 
-                    # 3. Kiểm tra bài đăng có thiếu copytag không
+                    # 4. Kiểm tra bài đăng có thiếu copytag không
                     if copytag in current_tags:
                         continue
 
                     print(f"  [*] Post #{post_id} chứa nhân vật '{ch}' nhưng thiếu bản quyền '{copytag}'.")
 
-                    # 4. Kiểm tra chính sách Re-add chống edit-war
+                    # 5. Kiểm tra chính sách Re-add chống edit-war
                     allowed, reason = check_readd_permission(post_id, copytag, policy=scope.readd_policy)
                     if not allowed:
                         print(f"      [BỎ QUA] Post #{post_id} -> {reason}")
                         continue
 
-                    # 5. Kiểm tra Noti:ask (nếu yêu cầu duyệt)
+                    # 6. Kiểm tra Noti:ask (nếu yêu cầu duyệt)
                     if scope.should_ask():
                         print(f"      [NOTI:ASK] Bỏ qua chờ duyệt trên Discord cho Post #{post_id}")
                         continue
 
-                    # 6. Tiến hành thêm tag
+                    # 7. Tiến hành thêm tag
                     print(f"      [THÊM TAG] Hợp lệ! Đang gắn '{copytag}' vào Post #{post_id}...")
                     success = add_copytag_to_post(post_id, copytag, ch)
 
-                    # 7. Gửi thông báo Discord nếu có cờ Noti:discord
+                    # 8. Gửi thông báo Discord nếu có cờ Noti:discord
                     if success:
                         current_tags.add(copytag)
                         if scope.should_notify_discord():
