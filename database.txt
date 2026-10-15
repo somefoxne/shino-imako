@@ -1,0 +1,26 @@
+# ==============================================================================
+# COPYRIGHT REQUEST DATABASE
+# ==============================================================================
+# QUY ƯỚC ĐỊNH DẠNG:
+# 1. Dòng ĐÃ DUYỆT (Không có dấu ? ở đầu):
+#    chartag -> copytag
+#    Chỉ gồm 1 thẻ nhân vật -> 1 thẻ bản quyền chính xác đã được duyệt.
+#
+# 2. Dòng CHƯA DUYỆT (Có dấu ? ở đầu):
+#    ?chartag -> copytag1 copytag2 copytag3 ...
+#    Bot tự động lấy top 10 related tags thuộc category copyright và ghi vào đây.
+#    Người duyệt chỉ cần kiểm tra: xóa dấu ?, giữ lại 1 copytag chuẩn nhất và xóa tag thừa.
+# ==============================================================================
+
+# --- CÁC CÔNG THỨC ĐÃ DUYỆT ---
+ookami_mio -> hololive
+shirakami_fubuki -> hololive
+inugami_korone -> hololive
+nekomata_okayu -> hololive
+rem_(re:zero) -> re:zero_kara_hajimeru_isekai_seikatsu
+asuka_langley_souryuu -> neon_genesis_evangelion
+
+# --- CÁC CÔNG THỨC CHỜ DUYỆT (TỰ ĐỘNG THÊM BỞI BOT) ---
+?ookami_mio -> hololive hololive_gamers hololive_japan cover_corp
+?tokino_sora -> hololive cover_corp
+?sakura_miko -> hololive cover_corp
