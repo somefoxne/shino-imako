@@ -66,7 +66,7 @@ def run_loop_service(test_mode_override: Optional[bool] = None, run_once: bool =
 def main():
     parser = argparse.ArgumentParser(description="Danbooru Copytag Bot - Shino Imako")
     parser.add_argument("--scan", action="store_true", help="Chạy quét bài đăng theo checkfile.txt")
-    parser.add_argument("--update-db", nargs="+", help="Lấy related copyright tags cho chartag cụ thể, ghi '?chartag -> ...' và push Git database")
+    parser.add_argument("--update-db", nargs="*", help="Lấy related copyright tags cho chartag cụ thể, ghi '?chartag -> ...' và push Git database (nếu để trống sẽ đọc từ UPDATE_DB_TAGS trong .env)")
     parser.add_argument("--crawl-chartags", action="store_true", help="Cào danh sách character tags từ Danbooru (category=4, hide_empty=yes, order=date) để cập nhật database")
     parser.add_argument("--max-pages", type=int, default=None, help="Giới hạn số trang cào từ Danbooru (mỗi trang 100 tags)")
     parser.add_argument("--max-tags", type=int, default=None, help="Giới hạn số lượng character tags mới cần xử lý")
@@ -86,10 +86,23 @@ def main():
     if args.crawl_chartags:
         bot.configure_environment(test_mode_override=test_override)
         bot.crawl_and_update_database(max_tags=args.max_tags, max_pages=args.max_pages)
-    # 2. Nếu người dùng chỉ định cụ thể các chartag cần update
-    elif args.update_db:
+    # 2. Nếu người dùng chọn cập nhật tag cụ thể (hoặc đọc từ UPDATE_DB_TAGS trong .env)
+    elif args.update_db is not None:
         bot.configure_environment(test_mode_override=test_override)
-        bot.update_database_pipeline(args.update_db)
+        tags = args.update_db
+        if not tags:
+            env_tags = os.getenv("UPDATE_DB_TAGS", "").strip()
+            if env_tags:
+                tags = env_tags.split()
+        if not tags:
+            print("\n[!] Không tìm thấy tag nào để cập nhật.")
+            print("[*] Hướng dẫn sử dụng:")
+            print("    1. Điền vào .env: UPDATE_DB_TAGS=ten_nhan_vat_1 ten_nhan_vat_2")
+            print("       Sau đó chạy: python update_tags.py (hoặc python main.py --update-db)")
+            print("    2. Hoặc truyền trực tiếp: python main.py --update-db ten_nhan_vat_1 ten_nhan_vat_2\n")
+        else:
+            bot.update_database_pipeline(tags)
+
     else:
         # Mặc định: Chạy quét bài đăng liên tục 24/7
         run_loop_service(test_mode_override=test_override, run_once=args.once)
