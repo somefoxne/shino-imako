@@ -37,9 +37,10 @@ def run_loop_service(test_mode_override: Optional[bool] = None, run_once: bool =
     print("=" * 65 + "\n")
 
     # Đảm bảo repo database đã được clone/pull mới nhất
-    db_file = bot.ensure_database_repo()
-    approved_db, unapproved_db = bot.parse_database(db_file)
+    bot.ensure_database_repo()
+    approved_db, unapproved_db = bot.parse_all_databases(bot.DATABASE_REPO_DIR)
     print(f"[*] Database: {len(approved_db)} quy tắc ĐÃ DUYỆT, {len(unapproved_db)} quy tắc CHƯA DUYỆT.")
+
 
     cycle_num = 1
     try:

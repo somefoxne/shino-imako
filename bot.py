@@ -338,6 +338,51 @@ def parse_database(filepath: str) -> Tuple[Dict[str, str], Dict[str, List[str]]]
     return approved_db, unapproved_db
 
 
+def parse_all_databases(repo_dir: str) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
+    """
+    Đọc TẤT CẢ các file .txt trong thư mục repo database và gộp kết quả lại:
+    - database.txt        : Bot tự ghi tag chờ duyệt (?chartag -> ...) vào đây.
+    - Các file .txt khác  : File do người dùng tự đặt tên (ví dụ: hololive.txt, arknights.txt),
+                            chứa các tag ĐÃ DUYỆT mà người dùng tự soạn sẵn.
+    - Bot CHỈ ĐỌC từ các file tên khác (không bao giờ ghi đè/xóa nội dung chúng).
+    - Nếu một chartag có trong nhiều file: dòng ĐÃ DUYỆT luôn được ưu tiên hơn CHƯA DUYỆT.
+    """
+    merged_approved: Dict[str, str] = {}
+    merged_unapproved: Dict[str, List[str]] = {}
+
+    if not os.path.isdir(repo_dir):
+        db_file = os.path.join(repo_dir, DATABASE_FILENAME)
+        return parse_database(db_file)
+
+    txt_files = sorted([
+        f for f in os.listdir(repo_dir)
+        if f.endswith(".txt") and not f.startswith(".")
+    ])
+
+    if not txt_files:
+        return merged_approved, merged_unapproved
+
+    loaded_summary = []
+    for filename in txt_files:
+        filepath = os.path.join(repo_dir, filename)
+        approved, unapproved = parse_database(filepath)
+        # Gộp approved: ưu tiên file tên riêng (hololive.txt...) hơn database.txt
+        for chartag, copytag in approved.items():
+            if chartag not in merged_approved:
+                merged_approved[chartag] = copytag
+        # Gộp unapproved: chỉ thêm nếu chưa có trong approved của bất kỳ file nào
+        for chartag, copytags in unapproved.items():
+            if chartag not in merged_approved and chartag not in merged_unapproved:
+                merged_unapproved[chartag] = copytags
+        if approved or unapproved:
+            loaded_summary.append(f"{filename}({len(approved)}\u2713 {len(unapproved)}?)")
+
+    if loaded_summary:
+        print(f"[*] Nạp database từ {len(txt_files)} file: {', '.join(loaded_summary)}")
+
+    return merged_approved, merged_unapproved
+
+
 def update_database_file(filepath: str, chartag: str, top_copytags: List[str], approved: bool = False):
     """
     Cập nhật hoặc thêm quy tắc nhân vật -> bản quyền vào file database.txt:
@@ -574,9 +619,10 @@ def crawl_and_update_database(max_tags: Optional[int] = None, max_pages: Optiona
     Mọi quy tắc cào tự động đều lưu dưới dạng CHỜ DUYỆT (?chartag -> copytags...) để người quản trị kiểm duyệt.
     """
     db_file_path = ensure_database_repo()
-    approved_db, unapproved_db = parse_database(db_file_path)
+    approved_db, unapproved_db = parse_all_databases(DATABASE_REPO_DIR)
     existing_chartags = set(approved_db.keys()) | set(unapproved_db.keys())
     print(f"[*] Database hiện có: {len(approved_db)} đã duyệt, {len(unapproved_db)} chưa duyệt.")
+
 
     url = f"{DANBOORU_HOST}/tags.json"
     page = 1
@@ -835,11 +881,12 @@ def scan_and_apply_copytags():
     - Các nhân vật mới phát hiện sẽ được tự động ghi vào database dưới dạng CHỜ DUYỆT (?chartag -> ...) và đẩy lên Git để người quản trị xem xét.
     """
     db_file_path = ensure_database_repo()
-    approved_db, unapproved_db = parse_database(db_file_path)
+    approved_db, unapproved_db = parse_all_databases(DATABASE_REPO_DIR)
 
     print(f"[*] Đã tải {len(approved_db)} công thức ĐÃ DUYỆT từ database.")
     if unapproved_db:
         print(f"[*] (Có {len(unapproved_db)} công thức CHƯA DUYỆT đang chờ kiểm tra).")
+
 
     if not approved_db:
         print("[!] Chú ý: Chưa có công thức nào được DUYỆT trong database (chỉ có công thức chờ duyệt hoặc database trống).")
