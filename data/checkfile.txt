@@ -1,2 +1,2 @@
--ai-generated -off-topic age:24h
+-ai-generated -off-topic age:<24h
 copyright_request -check_copyright 
