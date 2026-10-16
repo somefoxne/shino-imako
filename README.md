@@ -131,5 +131,6 @@ RE_ADD_POLICY=never
    # Chạy kiểm tra trên Testbooru:
    python main.py --once --test
    ```
-
-
+---
+16c1380 fin
+check https://github.com/somefoxne/copyright_request_database/blob/main/database.txt
