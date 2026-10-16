@@ -774,14 +774,28 @@ def send_discord_notification(post_id: int, chartag: str, copytag: str, post_dat
 def add_copytag_to_post(post_id: int, copytag: str, chartag: str, current_tags: Optional[Set[str]] = None) -> bool:
     """Thực hiện gọi API Danbooru thêm copytag vào post"""
     url = f"{DANBOORU_HOST}/posts/{post_id}.json"
+
+    # Nếu chưa có current_tags, tự động lấy tags hiện tại của post từ Danbooru
+    if current_tags is None:
+        try:
+            resp_post = danbooru_api_request("GET", url)
+            if resp_post.status_code == 200:
+                current_tags = set(resp_post.json().get("tag_string", "").split())
+            else:
+                current_tags = set()
+        except Exception:
+            current_tags = set()
+
+    new_tags = sorted(list(current_tags | {copytag}))
+    old_tags_str = " ".join(sorted(list(current_tags)))
+    new_tags_str = " ".join(new_tags)
+
+    # Danbooru Rails Strong Parameters chỉ cho phép: tag_string, old_tag_string
+    # KHÔNG gửi tag_string_diff hay edit_reason vì sẽ bị lỗi UnpermittedParameters 403
     data = {
-        "post[tag_string_diff]": f"+{copytag}",
-        "post[edit_reason]": f"[Bot] Auto add copyright: {chartag} -> {copytag}"
+        "post[tag_string]": new_tags_str,
+        "post[old_tag_string]": old_tags_str
     }
-    if current_tags:
-        new_tags = sorted(list(current_tags | {copytag}))
-        data["post[tag_string]"] = " ".join(new_tags)
-        data["post[old_tag_string]"] = " ".join(sorted(list(current_tags)))
 
     try:
         resp = danbooru_api_request("PUT", url, data=data)
@@ -795,6 +809,7 @@ def add_copytag_to_post(post_id: int, copytag: str, chartag: str, current_tags: 
     except Exception as e:
         print(f"[!] Lỗi khi update post #{post_id}: {e}")
         return False
+
 
 
 
