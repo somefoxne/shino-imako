@@ -677,17 +677,25 @@ def crawl_and_update_database(max_tags: Optional[int] = None, max_pages: Optiona
 def check_readd_permission(post_id: int, copytag: str, policy: Optional[str] = None) -> Tuple[bool, str]:
     """
     Kiểm tra chính sách Re-add để chống chiến tranh tag (Edit-war):
-    - policy: 'never' (mặc định) hoặc một số nguyên (ví dụ '5' -> cần ít nhất 5 version kể từ lúc bị xóa).
+    - policy: 'never' (mặc định), 'off'/'none' (tắt kiểm tra), hoặc một số nguyên (ví dụ '5' -> cần ít nhất 5 version kể từ lúc bị xóa).
     - Trả về (allowed, reason)
     """
     effective_policy = (policy or DEFAULT_READD_POLICY).lower().strip()
+    if effective_policy in ("off", "none", "disable", "disabled", "false", "0"):
+        return True, "Chính sách re-add đã tắt"
+
     url = f"{DANBOORU_HOST}/post_versions.json"
     params = {"search[post_id]": post_id, "limit": 100}
 
     try:
         resp = danbooru_api_request("GET", url, params=params)
         if resp.status_code != 200:
+            if resp.status_code in (401, 403):
+                # Endpoint post_versions trên Danbooru bị giới hạn quyền đối với tài khoản thành viên thông thường.
+                # Bỏ qua kiểm tra re-add để không làm tắc nghẽn quá trình gán tag của bot.
+                return True, f"Bỏ qua kiểm tra re-add (HTTP {resp.status_code}: tài khoản không có quyền xem post_versions)"
             return False, f"HTTP {resp.status_code} khi kiểm tra post_versions"
+
 
 
         versions = resp.json()
@@ -762,13 +770,17 @@ def send_discord_notification(post_id: int, chartag: str, copytag: str, post_dat
         print(f"[!] Không thể gửi Discord Webhook: {e}")
 
 
-def add_copytag_to_post(post_id: int, copytag: str, chartag: str) -> bool:
+def add_copytag_to_post(post_id: int, copytag: str, chartag: str, current_tags: Optional[Set[str]] = None) -> bool:
     """Thực hiện gọi API Danbooru thêm copytag vào post"""
     url = f"{DANBOORU_HOST}/posts/{post_id}.json"
     data = {
         "post[tag_string_diff]": f"+{copytag}",
         "post[edit_reason]": f"[Bot] Auto add copyright: {chartag} -> {copytag}"
     }
+    if current_tags:
+        new_tags = sorted(list(current_tags | {copytag}))
+        data["post[tag_string]"] = " ".join(new_tags)
+        data["post[old_tag_string]"] = " ".join(sorted(list(current_tags)))
 
     try:
         resp = danbooru_api_request("PUT", url, data=data)
@@ -782,6 +794,7 @@ def add_copytag_to_post(post_id: int, copytag: str, chartag: str) -> bool:
     except Exception as e:
         print(f"[!] Lỗi khi update post #{post_id}: {e}")
         return False
+
 
 
 # ==========================================
@@ -901,7 +914,8 @@ def scan_and_apply_copytags():
 
                     # 7. Tiến hành thêm tag
                     print(f"      [THÊM TAG] Hợp lệ! Đang gắn '{copytag}' vào Post #{post_id}...")
-                    success = add_copytag_to_post(post_id, copytag, ch)
+                    success = add_copytag_to_post(post_id, copytag, ch, current_tags=current_tags)
+
 
                     # 8. Gửi thông báo Discord nếu có cờ Noti:discord
                     if success:
