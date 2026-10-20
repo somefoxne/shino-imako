@@ -862,27 +862,48 @@ def add_copytag_to_post(post_id: int, copytag: str, chartag: str, current_tags: 
 # ==========================================
 # 5. CƠ CHẾ QUÉT THEO CHECKFILE (DANBOORU SCOPES / RULES)
 # ==========================================
+MIN_POST_COUNT_FOR_AUTO_TAG = int(os.getenv("MIN_POST_COUNT_AUTO", "1000"))
+
+
+def get_tag_post_count(chartag: str) -> int:
+    """Tra cứu số lượng post của một tag trên Danbooru."""
+    url = f"{DANBOORU_HOST}/tags.json"
+    params = {"search[name]": chartag, "search[hide_empty]": "no"}
+    try:
+        resp = danbooru_api_request("GET", url, params=params)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and data:
+                return data[0].get('post_count', 0)
+    except Exception as e:
+        print(f"[!] Lỗi khi lấy post_count cho '{chartag}': {e}")
+    return 0
+
+
 def scan_and_apply_copytags():
     """
-    Quét bài đăng theo các rule trong data/checkfile.txt:
-    - Rule (trong checkfile.txt): dùng để giới hạn bot không quét các post chưa cần quét.
-    - Database (trong copyright_request_database): từ điển ánh xạ chartag -> copytag.
-    
-    NGUYÊN TẮC DUYỆT BẢO VỆ:
-    - Chỉ các quy tắc ĐÃ DUYỆT (không có '?') mới được phép tự động gán vào bài đăng Danbooru.
-    - Các nhân vật mới phát hiện sẽ được tự động ghi vào database dưới dạng CHỜ DUYỆT (?chartag -> ...) và đẩy lên Git để người quản trị xem xét.
+    Quét bài đăng theo các rule trong data/checkfile.txt.
+
+    LUỒNG XỬ LÝ KHI GẶP NHÂN VẬT:
+    A) CÓ trong database (các file .txt trong repo copyright_request_database):
+       - Gán copytag tương ứng vào post bình thường.
+    B) CHƯA có trong database:
+       - Kiểm tra post_count của character tag đó trên Danbooru.
+       - Nếu post_count > MIN_POST_COUNT_AUTO (mặc định 1000):
+           lấy top 1 related copyright tag rồi gán thẳng vào post.
+       - Nếu post_count <= 1000: bỏ qua.
     """
-    db_file_path = ensure_database_repo()
-    approved_db, unapproved_db = parse_all_databases(DATABASE_REPO_DIR)
+    ensure_database_repo()
+    approved_db, _ = parse_all_databases(DATABASE_REPO_DIR)
 
     print(f"[*] Đã tải {len(approved_db)} công thức ĐÃ DUYỆT từ database.")
-    if unapproved_db:
-        print(f"[*] (Có {len(unapproved_db)} công thức CHƯA DUYỆT đang chờ kiểm tra).")
+    print(f"[*] Ngưỡng tự động: nhân vật chưa trong database xử lý nếu post_count > {MIN_POST_COUNT_FOR_AUTO_TAG}.")
 
+    # Cache trong chu kỳ: chartag -> top1_copytag (hoặc None)
+    _auto_cache: Dict[str, Optional[str]] = {}
 
     if not approved_db:
-        print("[!] Chú ý: Chưa có công thức nào được DUYỆT trong database (chỉ có công thức chờ duyệt hoặc database trống).")
-        print("[*] Bot sẽ quét các bài đăng để phát hiện nhân vật mới và tự động cập nhật công thức chờ duyệt '?chartag' lên Git...")
+        print("[!] Database trống - Bot sẽ dùng chế độ tự động cho toàn bộ nhân vật.")
 
     if not os.path.exists(CHECKFILE_PATH):
         print(f"[!] Không tìm thấy file {CHECKFILE_PATH}. Vui lòng tạo file này để chạy bot.")
@@ -938,31 +959,34 @@ def scan_and_apply_copytags():
                     character_tags = [t for t in current_tags if t in approved_db]
 
                 for ch in character_tags:
-                    # 2. Xử lý nhân vật chưa được DUYỆT
-                    if ch not in approved_db:
-                        if ch not in unapproved_db:
-                            print(f"  [*] Post #{post_id}: Phát hiện character tag '{ch}' chưa có trong database.")
-                            top_tags = fetch_top_copyright_tags(ch, limit=10)
-                            if top_tags:
-                                unapproved_db[ch] = top_tags
-                                update_database_file(db_file_path, ch, top_tags, approved=False)
-                                print(f"      -> Tự động lưu database chờ duyệt: ?{ch} -> {' '.join(top_tags)}")
-                                git_push_database(f"Discovered new candidate: ?{ch} -> {' '.join(top_tags)}")
-                            else:
-                                unapproved_db[ch] = []
-                        # Không gắn vào post vì quy tắc chưa được duyệt
-                        continue
+                    # A. Nhân vật CÓ trong database đã duyệt
+                    if ch in approved_db:
+                        copytag = approved_db.get(ch)
+                        if not copytag or copytag in current_tags:
+                            continue
+                        print(f"  [*] Post #{post_id}: '{ch}' thiếu bản quyền '{copytag}' (database).")
 
-                    # 3. Nhân vật đã được DUYỆT trong approved_db
-                    copytag = approved_db.get(ch)
-                    if not copytag:
-                        continue
+                    # B. Nhân vật CHƯA có trong database -> kiểm tra post_count rồi tự động gán
+                    else:
+                        if ch in _auto_cache:
+                            copytag = _auto_cache[ch]
+                            if not copytag or copytag in current_tags:
+                                continue
+                        else:
+                            post_count = get_tag_post_count(ch)
+                            if post_count <= MIN_POST_COUNT_FOR_AUTO_TAG:
+                                _auto_cache[ch] = None
+                                continue
+                            top_tags = fetch_top_copyright_tags(ch, limit=1)
+                            copytag = top_tags[0] if top_tags else None
+                            _auto_cache[ch] = copytag
+                            if not copytag:
+                                print(f"  [-] Post #{post_id}: '{ch}' có {post_count} bài nhưng không tìm được copyright tag.")
+                                continue
+                            if copytag in current_tags:
+                                continue
+                            print(f"  [*] Post #{post_id}: '{ch}' ({post_count} bài) -> tự động gán '{copytag}'.")
 
-                    # 4. Kiểm tra bài đăng có thiếu copytag không
-                    if copytag in current_tags:
-                        continue
-
-                    print(f"  [*] Post #{post_id} chứa nhân vật '{ch}' nhưng thiếu bản quyền '{copytag}'.")
 
                     # 5. Kiểm tra chính sách Re-add chống edit-war
                     allowed, reason = check_readd_permission(post_id, copytag, policy=scope.readd_policy)
