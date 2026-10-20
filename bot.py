@@ -894,7 +894,7 @@ def scan_and_apply_copytags():
        - Nếu post_count <= 1000: bỏ qua.
     """
     db_file_path = ensure_database_repo()
-    approved_db, _ = parse_all_databases(DATABASE_REPO_DIR)
+    approved_db, unapproved_db = parse_all_databases(DATABASE_REPO_DIR)
 
     print(f"[*] Đã tải {len(approved_db)} công thức ĐÃ DUYỆT từ database.")
     print(f"[*] Ngưỡng tự động: nhân vật chưa trong database xử lý nếu post_count > {MIN_POST_COUNT_FOR_AUTO_TAG}.")
@@ -966,12 +966,18 @@ def scan_and_apply_copytags():
                             continue
                         print(f"  [*] Post #{post_id}: '{ch}' thiếu bản quyền '{copytag}' (database).")
 
-                    # B. Nhân vật CHƯA có trong database -> kiểm tra post_count rồi tự động gán
+                    # B. Nhân vật CHƯA có trong database -> kiểm tra post_count, gán vào post và gửi duyệt ?chartag -> copytag lên Git
                     else:
                         if ch in _auto_cache:
                             copytag = _auto_cache[ch]
                             if not copytag or copytag in current_tags:
                                 continue
+                        elif ch in unapproved_db and unapproved_db[ch]:
+                            copytag = unapproved_db[ch][0]
+                            _auto_cache[ch] = copytag
+                            if copytag in current_tags:
+                                continue
+                            print(f"  [*] Post #{post_id}: '{ch}' (chờ duyệt) -> gán bản quyền '{copytag}'.")
                         else:
                             post_count = get_tag_post_count(ch)
                             if post_count <= MIN_POST_COUNT_FOR_AUTO_TAG:
@@ -983,15 +989,17 @@ def scan_and_apply_copytags():
                             if not copytag:
                                 print(f"  [-] Post #{post_id}: '{ch}' có {post_count} bài nhưng không tìm được copyright tag.")
                                 continue
+
+                            print(f"  [*] Post #{post_id}: '{ch}' ({post_count} bài > {MIN_POST_COUNT_FOR_AUTO_TAG}) -> chọn '{copytag}'.")
+
+                            # Gửi duyệt ?chartag -> copytag vào database và đẩy Git
+                            update_database_file(db_file_path, ch, [copytag], approved=False)
+                            unapproved_db[ch] = [copytag]
+                            print(f"      -> Đã gửi duyệt vào database: ?{ch} -> {copytag}")
+                            git_push_database(f"Discovered candidate (>1000 posts): ?{ch} -> {copytag}")
+
                             if copytag in current_tags:
                                 continue
-                            print(f"  [*] Post #{post_id}: '{ch}' ({post_count} bài) -> tự động gán '{copytag}'.")
-
-                            # Thêm quy tắc ĐÃ DUYỆT vào database và đẩy Git
-                            update_database_file(db_file_path, ch, [copytag], approved=True)
-                            approved_db[ch] = copytag
-                            print(f"      -> Đã thêm ĐÃ DUYỆT vào database: {ch} -> {copytag}")
-                            git_push_database(f"Auto-approved (>1000 posts): {ch} -> {copytag}")
 
 
                     # 5. Kiểm tra chính sách Re-add chống edit-war
