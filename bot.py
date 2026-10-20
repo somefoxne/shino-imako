@@ -893,7 +893,7 @@ def scan_and_apply_copytags():
            lấy top 1 related copyright tag rồi gán thẳng vào post.
        - Nếu post_count <= 1000: bỏ qua.
     """
-    ensure_database_repo()
+    db_file_path = ensure_database_repo()
     approved_db, _ = parse_all_databases(DATABASE_REPO_DIR)
 
     print(f"[*] Đã tải {len(approved_db)} công thức ĐÃ DUYỆT từ database.")
@@ -986,6 +986,12 @@ def scan_and_apply_copytags():
                             if copytag in current_tags:
                                 continue
                             print(f"  [*] Post #{post_id}: '{ch}' ({post_count} bài) -> tự động gán '{copytag}'.")
+
+                            # Thêm quy tắc ĐÃ DUYỆT vào database và đẩy Git
+                            update_database_file(db_file_path, ch, [copytag], approved=True)
+                            approved_db[ch] = copytag
+                            print(f"      -> Đã thêm ĐÃ DUYỆT vào database: {ch} -> {copytag}")
+                            git_push_database(f"Auto-approved (>1000 posts): {ch} -> {copytag}")
 
 
                     # 5. Kiểm tra chính sách Re-add chống edit-war
