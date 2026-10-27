@@ -24,6 +24,16 @@ def run_loop_service(test_mode_override: Optional[bool] = None, run_once: bool =
     """
     bot.configure_environment(test_mode_override=test_mode_override)
     
+    # Kiểm tra trạng thái token GitHub
+    github_tok = bot.get_github_token()
+    if github_tok:
+        masked_tok = github_tok[:4] + "*" * max(0, len(github_tok) - 8) + github_tok[-4:] if len(github_tok) > 8 else "***"
+        git_tok_str = f"ĐÃ THIẾT LẬP ({masked_tok})"
+    else:
+        git_tok_str = "CHƯA THIẾT LẬP (Cần GITHUB_TOKEN để push!)"
+
+    owner_dm = bot.BOT_OWNER_DANBOORU or os.getenv("BOT_OWNER_DANBOORU", "").strip()
+
     print("\n" + "=" * 65)
     print(" DANBOORU COPYTAG BOT - SHINO IMAKO (24/7 SERVICE)")
     print("=" * 65)
@@ -31,6 +41,10 @@ def run_loop_service(test_mode_override: Optional[bool] = None, run_once: bool =
     print(f"[*] Tài khoản        : {bot.USERNAME or '(Chưa thiết lập)'}")
     print(f"[*] Chế độ TEST_MODE : {'BẬT (Testbooru)' if bot.TEST_MODE else 'TẮT (Danbooru thật)'}")
     print(f"[*] Git Database     : {bot.DATABASE_REPO_URL}")
+    print(f"[*] Git Token        : {git_tok_str}")
+    print(f"[*] Chủ sở hữu Bot   : {owner_dm or '(Chưa cấu hình BOT_OWNER_DANBOORU)'}")
+    print(f"[*] Chuyển tiếp Dmail: {'Discord Webhook' if bot.DISCORD_WEBHOOK_URL else 'Tắt (Chưa có Webhook)'}")
+    print(f"[*] Chính sách       : {'Chỉ add 1 lần (data/added_posts.txt)' if bot.ONLY_ADD_ONCE else 'Add theo rule'}")
     print(f"[*] File phạm vi     : {bot.CHECKFILE_PATH}")
     print(f"[*] Vòng lặp 24/7    : {'BẬT (Mỗi ' + str(LOOP_INTERVAL) + 's)' if not run_once else 'TẮT (Chạy 1 lần)'}")
     print("=" * 65 + "\n")
@@ -40,15 +54,16 @@ def run_loop_service(test_mode_override: Optional[bool] = None, run_once: bool =
     approved_db, unapproved_db = bot.parse_all_databases(bot.DATABASE_REPO_DIR)
     print(f"[*] Database: {len(approved_db)} quy tắc ĐÃ DUYỆT, {len(unapproved_db)} quy tắc CHƯA DUYỆT.")
 
-
     cycle_num = 1
     try:
         while True:
             print(f"\n>>> [CHU KỲ #{cycle_num}] Bắt đầu lúc {time.strftime('%Y-%m-%d %H:%M:%S')} <<<")
             
-            # Thực thi quét bài và gắn copytag
-            bot.scan_and_apply_copytags()
+            # 1. Kiểm tra và chuyển tiếp Dmail tới chủ bot
+            bot.check_and_forward_dmails()
 
+            # 2. Thực thi quét bài và gắn copytag
+            bot.scan_and_apply_copytags()
 
             if run_once or not RUN_LOOP_ENV:
                 print("\n[*] Hoàn tất chu kỳ quét đơn (chế độ chạy 1 lần).")
@@ -74,6 +89,7 @@ def main():
     parser.add_argument("--test", action="store_true", help="Bật chế độ TEST_MODE (Testbooru: https://testbooru.donmai.us)")
     parser.add_argument("--live", action="store_true", help="Chạy chế độ PRODUCTION (Danbooru thật)")
     parser.add_argument("--once", action="store_true", help="Chỉ quét 1 lần rồi thoát (tắt vòng lặp 24/7)")
+    parser.add_argument("--check-dms", "--dmail", dest="check_dms", action="store_true", help="Kiểm tra hòm thư Dmail và chuyển tiếp tin nhắn tới chủ bot")
     
     args = parser.parse_args()
 
@@ -82,6 +98,15 @@ def main():
         test_override = True
     elif args.live:
         test_override = False
+
+    # 0. Nếu chạy kiểm tra tin nhắn Dmail thủ công
+    if args.check_dms:
+        bot.configure_environment(test_mode_override=test_override)
+        print("[*] Đang kiểm tra hộp thư Danbooru Dmail của bot...")
+        count = bot.check_and_forward_dmails()
+        if count == 0:
+            print("[*] Không có tin nhắn Dmail mới nào.")
+        return
 
     # 1. Nếu chạy cào danh sách character tags từ Danbooru
     if args.crawl_chartags:

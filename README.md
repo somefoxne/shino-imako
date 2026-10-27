@@ -89,13 +89,21 @@ DANBOORU_USERNAME=your_danbooru_username
 DANBOORU_API_KEY=your_danbooru_api_key
 
 # ==========================================
-# DISCORD & CẤU HÌNH KHÁC
+# DISCORD, DMAIL & CHÍNH SÁCH
 # ==========================================
 DISCORD_TOKEN=your_discord_token_here
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+BOT_OWNER_DANBOORU=your_danbooru_owner_username
+ONLY_ADD_ONCE=true
 DATABASE_REPO_URL=https://github.com/somefoxne/copyright_request_database.git
+GITHUB_TOKEN=your_github_personal_access_token_here
 RE_ADD_POLICY=never
 ```
+
+### Tính năng mới:
+- **Chuyển tiếp tin nhắn Dmail (`BOT_OWNER_DANBOORU` / `DISCORD_WEBHOOK_URL`)**: Tự động chuyển tiếp các tin nhắn Dmail gửi tới tài khoản bot trên Danbooru sang Discord Webhook và/hoặc gửi tiếp vào tài khoản cá nhân của chủ sở hữu trên Danbooru.
+- **Chính sách chỉ add 1 lần (`ONLY_ADD_ONCE=true`)**: Lưu danh sách các bài đăng đã từng thêm tag vào `data/added_posts.txt`. Bot sẽ không bao giờ sửa lại các bài đăng đã xử lý.
+- **Tự động gom push Git database**: Khi gặp nhân vật chưa có trong database có >1000 post, bot sẽ tự động lấy top 1 copyright tag, gắn vào bài và gom gửi commit/push lên `copyright_request_database`.
 
 ### Lệnh chạy:
 
@@ -130,6 +138,11 @@ RE_ADD_POLICY=never
 
    # Chạy kiểm tra trên Testbooru:
    python main.py --once --test
+   ```
+
+5. **Kiểm tra và chuyển tiếp tin nhắn Danbooru Dmail thủ công**:
+   ```bash
+   python main.py --check-dms
    ```
 ---
 16c1380 fin

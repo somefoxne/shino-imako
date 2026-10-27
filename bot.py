@@ -39,6 +39,12 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DEFAULT_READD_POLICY = os.getenv("RE_ADD_POLICY", "never").strip().lower()
 
+# Chủ sở hữu bot (tài khoản Danbooru)
+BOT_OWNER_DANBOORU = os.getenv("BOT_OWNER_DANBOORU", "").strip()
+
+# Chính sách chỉ add 1 lần (không bao giờ gán lại bài đăng đã được bot xử lý)
+ONLY_ADD_ONCE = os.getenv("ONLY_ADD_ONCE", "true").strip().lower() in ("true", "1", "yes", "on")
+
 # 2 Kho Git riêng biệt:
 DATABASE_REPO_URL = os.getenv(
     "DATABASE_REPO_URL", 
@@ -132,13 +138,32 @@ def danbooru_api_request(method: str, url: str, **kwargs) -> requests.Response:
 # ==========================================
 # 1. QUẢN LÝ GIT CHO DATABASE REPO
 # ==========================================
+def get_github_token() -> str:
+    """
+    Tìm GitHub Personal Access Token từ các biến môi trường phổ biến trong .env
+    Hỗ trợ: GH_DATABASE_TOKEN, GITHUB_DATABASE_TOKEN, GITHUB_TOKEN, GH_TOKEN, GIT_TOKEN, GITHUB_PAT
+    """
+    for var in [
+        "GH_DATABASE_TOKEN", "GITHUB_DATABASE_TOKEN",
+        "GITHUB_TOKEN", "GH_TOKEN", "GIT_TOKEN", "GITHUB_PAT"
+    ]:
+        val = os.getenv(var, "").strip()
+        if val:
+            return val
+    return ""
+
+
 def get_database_repo_url() -> str:
-    """Trả về URL repo database, tự động nhúng GITHUB_TOKEN nếu có cấu hình trong .env"""
+    """Trả về URL repo database, tự động nhúng GitHub token nếu có cấu hình trong .env"""
     url = DATABASE_REPO_URL.strip()
-    github_token = os.getenv("GITHUB_TOKEN", "").strip() or os.getenv("GIT_TOKEN", "").strip()
-    if github_token and url.startswith("https://") and "@" not in url:
-        # Sử dụng tiền tố x-access-token chuẩn cho GitHub Personal Access Token
-        url = url.replace("https://", f"https://x-access-token:{github_token}@")
+    github_token = get_github_token()
+    if github_token:
+        if "@" in url:
+            _, host_path = url.split("@", 1)
+            scheme = "https://" if url.startswith("https://") else "http://"
+            return f"{scheme}x-access-token:{github_token}@{host_path}"
+        elif url.startswith("https://"):
+            return url.replace("https://", f"https://x-access-token:{github_token}@")
     return url
 
 
@@ -165,7 +190,7 @@ def is_valid_git_repo(repo_dir: str) -> bool:
     if not os.path.isdir(repo_dir):
         return False
     git_dir = os.path.join(repo_dir, ".git")
-    if not os.path.exists(git_dir):
+    if not os.path.isdir(git_dir):
         return False
     res = run_git_command(["git", "-C", repo_dir, "rev-parse", "--is-inside-work-tree"])
     return res.returncode == 0
@@ -182,7 +207,15 @@ def configure_git_repo(repo_dir: str):
             run_git_command(["git", "-C", repo_dir, "config", "user.name", "Shino Imako Bot"])
             run_git_command(["git", "-C", repo_dir, "config", "user.email", "bot@shino-imako.local"])
             target_url = get_database_repo_url()
-            run_git_command(["git", "-C", repo_dir, "remote", "set-url", "origin", target_url])
+            
+            remotes = run_git_command(["git", "-C", repo_dir, "remote"])
+            if "origin" in remotes.stdout.split():
+                run_git_command(["git", "-C", repo_dir, "remote", "set-url", "origin", target_url])
+            else:
+                run_git_command(["git", "-C", repo_dir, "remote", "add", "origin", target_url])
+
+            # Đảm bảo nhánh hiện tại được đặt tên là main
+            run_git_command(["git", "-C", repo_dir, "branch", "-M", "main"])
     except Exception as e:
         print(f"[!] Lỗi khi cấu hình Git repository: {e}")
 
@@ -209,6 +242,15 @@ def ensure_database_repo() -> str:
             shutil.rmtree(abs_repo_dir, ignore_errors=True)
         except Exception as e:
             print(f"[!] Không thể xóa thư mục cũ: {e}")
+
+        # Nếu rmtree không xóa hết (do file lock), đổi tên thư mục cũ sang backup
+        if os.path.exists(abs_repo_dir):
+            try:
+                backup_dir = f"{abs_repo_dir}_backup_{int(time.time())}"
+                os.rename(abs_repo_dir, backup_dir)
+                print(f"[*] Đã đổi tên thư mục cũ sang: {backup_dir}")
+            except Exception as e:
+                print(f"[!] Không thể đổi tên thư mục: {e}")
 
     if not os.path.exists(abs_repo_dir):
         print(f"[*] Thư mục repo database chưa tồn tại. Đang clone từ {DATABASE_REPO_URL}...")
@@ -252,35 +294,38 @@ def ensure_database_repo() -> str:
     return db_file_path
 
 
-def git_push_database(commit_message: str):
+def git_push_database(commit_message: str) -> bool:
     """
-    Commit và push các thay đổi trong file database.txt lên git database repo
+    Commit và push các thay đổi trong repo database lên GitHub.
+    Tự động xử lý rebase và cung cấp thông báo lỗi chi tiết nếu thiếu token hoặc không có quyền.
     """
     abs_repo_dir = os.path.abspath(DATABASE_REPO_DIR)
     if not is_valid_git_repo(abs_repo_dir):
         print(f"[-] Thư mục database '{DATABASE_REPO_DIR}' không phải git repository, bỏ qua git push.")
-        return
+        return False
 
-    github_token = os.getenv("GITHUB_TOKEN", "").strip() or os.getenv("GIT_TOKEN", "").strip()
+    github_token = get_github_token()
     if not github_token and DATABASE_REPO_URL.startswith("https://") and "@" not in DATABASE_REPO_URL:
-        print("[!] CẢNH BÁO GIT PUSH: Bạn chưa cấu hình GITHUB_TOKEN trong file .env!")
-        print("    -> GitHub yêu cầu xác thực để push code. Bot không thể push ẩn danh.")
-        print("    -> Vui lòng tạo Personal Access Token tại https://github.com/settings/tokens (quyền 'repo')")
-        print("    -> Sau đó thêm vào file .env: GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx")
+        print("\n[!] CẢNH BÁO GIT PUSH: Bạn chưa cấu hình GITHUB_TOKEN trong file .env!")
+        print("    -> GitHub yêu cầu xác thực tài khoản để ghi vào repository.")
+        print("    -> Hướng dẫn: Tạo Personal Access Token tại https://github.com/settings/tokens (chọn quyền 'repo')")
+        print("    -> Sau đó thêm vào file .env: GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx\n")
+        return False
 
     try:
         configure_git_repo(abs_repo_dir)
-        print(f"[*] Đang commit và push database: '{commit_message}'")
-        run_git_command(["git", "-C", abs_repo_dir, "add", DATABASE_FILENAME])
+        # Thêm tất cả thay đổi trong repo database (hỗ trợ cả database.txt và các file .txt do người dùng thêm)
+        run_git_command(["git", "-C", abs_repo_dir, "add", "-A"])
 
         diff_status = run_git_command(["git", "-C", abs_repo_dir, "diff", "--cached", "--quiet"])
         if diff_status.returncode != 0:
+            print(f"[*] Đang commit và push database: '{commit_message}'")
             commit_res = run_git_command(
                 ["git", "-C", abs_repo_dir, "commit", "-m", commit_message]
             )
             if commit_res.returncode != 0:
                 print(f"[!] Lỗi khi git commit: {commit_res.stderr.strip() or commit_res.stdout.strip()}")
-                return
+                return False
 
             # Tự động rebase từ remote trước khi push để tránh xung đột 'Updates were rejected'
             run_git_command(["git", "-C", abs_repo_dir, "pull", "--rebase", "origin", "main"])
@@ -290,23 +335,30 @@ def git_push_database(commit_message: str):
             )
             if push_res.returncode == 0:
                 print("[+] Git push database thành công!")
+                return True
             else:
                 push_res2 = run_git_command(
-                    ["git", "-C", abs_repo_dir, "push"]
+                    ["git", "-C", abs_repo_dir, "push", "-u", "origin", "main"]
                 )
                 if push_res2.returncode == 0:
                     print("[+] Git push database thành công!")
+                    return True
                 else:
                     err_msg = push_res.stderr.strip() or push_res2.stderr.strip() or push_res.stdout.strip()
                     print(f"[!] Lỗi khi git push database: {err_msg}")
-                    if "could not read Username" in err_msg or "Authentication failed" in err_msg or "Permission to" in err_msg:
+                    if "could not read Username" in err_msg or "Authentication failed" in err_msg or "Invalid username or token" in err_msg:
                         print("    >> NGUYÊN NHÂN: Thiếu hoặc sai GITHUB_TOKEN. Hãy điền GITHUB_TOKEN=ghp_... vào .env.")
+                    elif "Permission to" in err_msg and "denied" in err_msg:
+                        print("    >> NGUYÊN NHÂN: Token GitHub của bạn không có quyền ghi (write) vào repository copyright_request_database.")
                     elif "rejected" in err_msg:
-                        print("    >> NGUYÊN NHÂN: Remote có commit mới hơn. Bot đã thử rebase.")
+                        print("    >> NGUYÊN NHÂN: Remote có commit mới hơn. Bot đã thử rebase nhưng có xung đột.")
+                    return False
         else:
             print("[-] Không có thay đổi nào trong database để commit.")
+            return True
     except Exception as e:
         print(f"[!] Lỗi khi commit/push database: {e}")
+        return False
 
 
 # ==========================================
@@ -747,6 +799,254 @@ def crawl_and_update_database(max_tags: Optional[int] = None, max_pages: Optiona
 # ==========================================
 # 4. CHÍNH SÁCH RE-ADD & THÔNG BÁO DISCORD
 # ==========================================
+ADDED_POSTS_FILE = os.path.join("data", "added_posts.txt")
+_added_posts: Set[int] = set()
+
+def load_added_posts() -> Set[int]:
+    """
+    Tải danh sách ID các bài đăng mà bot đã từng gán tag thành công.
+    Đảm bảo bot không bao giờ chỉnh sửa lại một bài đăng nhiều lần ("chỉ add 1 lần").
+    """
+    global _added_posts
+    _added_posts = set()
+    if os.path.exists(ADDED_POSTS_FILE):
+        try:
+            with open(ADDED_POSTS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.isdigit():
+                        _added_posts.add(int(line))
+        except Exception as e:
+            print(f"[!] Lỗi khi đọc {ADDED_POSTS_FILE}: {e}")
+    return _added_posts
+
+
+def record_added_post(post_id: int):
+    """Ghi nhận post_id vào file lịch sử để không bao giờ xử lý lại"""
+    global _added_posts
+    _added_posts.add(post_id)
+    os.makedirs(os.path.dirname(ADDED_POSTS_FILE) or "data", exist_ok=True)
+    try:
+        with open(ADDED_POSTS_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{post_id}\n")
+    except Exception as e:
+        print(f"[!] Lỗi khi lưu {ADDED_POSTS_FILE}: {e}")
+
+
+# ==========================================
+# 4.1. CHUYỂN TIẾP TIN NHẮN (DMAIL FORWARDING) TỚI CHỦ SỞ HỮU
+# ==========================================
+FORWARDED_DMAILS_FILE = os.path.join("data", "forwarded_dmails.txt")
+_forwarded_dmails: Set[int] = set()
+_danbooru_user_cache: Dict[int, str] = {}
+
+
+def load_forwarded_dmails() -> Set[int]:
+    """Tải danh sách ID các Dmail đã được chuyển tiếp trước đó"""
+    global _forwarded_dmails
+    _forwarded_dmails = set()
+    if os.path.exists(FORWARDED_DMAILS_FILE):
+        try:
+            with open(FORWARDED_DMAILS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.isdigit():
+                        _forwarded_dmails.add(int(line))
+        except Exception as e:
+            print(f"[!] Lỗi khi đọc {FORWARDED_DMAILS_FILE}: {e}")
+    return _forwarded_dmails
+
+
+def record_forwarded_dmail(dmail_id: int):
+    """Ghi nhận dmail_id đã chuyển tiếp để không gửi lại lần thứ hai"""
+    global _forwarded_dmails
+    _forwarded_dmails.add(dmail_id)
+    os.makedirs(os.path.dirname(FORWARDED_DMAILS_FILE) or "data", exist_ok=True)
+    try:
+        with open(FORWARDED_DMAILS_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{dmail_id}\n")
+    except Exception as e:
+        print(f"[!] Lỗi khi lưu {FORWARDED_DMAILS_FILE}: {e}")
+
+
+def get_danbooru_username(user_id: int) -> str:
+    """Lấy username từ user_id trên Danbooru với bộ nhớ tạm (cache)"""
+    if not user_id:
+        return "Danbooru System"
+    if user_id in _danbooru_user_cache:
+        return _danbooru_user_cache[user_id]
+
+    url = f"{DANBOORU_HOST}/users/{user_id}.json"
+    try:
+        resp = danbooru_api_request("GET", url)
+        if resp.status_code == 200:
+            name = resp.json().get("name", "")
+            if name:
+                _danbooru_user_cache[user_id] = name
+                return name
+    except Exception:
+        pass
+
+    fallback = f"User #{user_id}"
+    _danbooru_user_cache[user_id] = fallback
+    return fallback
+
+
+def forward_dmail_to_discord(dm_id: int, from_name: str, from_id: Optional[int], title: str, body: str, created_at: str):
+    """Gửi nội dung Dmail lên Discord Webhook dưới dạng Embed đẹp mắt"""
+    if not DISCORD_WEBHOOK_URL:
+        return
+
+    dm_url = f"{DANBOORU_HOST}/dmails/{dm_id}"
+    sender_url = f"{DANBOORU_HOST}/users/{from_id}" if from_id else DANBOORU_HOST
+
+    short_body = body[:2000] if len(body) > 2000 else body
+    if len(body) > 2000:
+        short_body += f"\n\n*(Nội dung còn dài, xem đầy đủ tại link Dmail)*"
+
+    embed = {
+        "title": f"📬 [Danbooru Dmail] {title[:200] or '(Không có tiêu đề)'}",
+        "url": dm_url,
+        "description": short_body or "*(Nội dung trống)*",
+        "color": 16750848, # Màu cam
+        "fields": [
+            {"name": "Người gửi", "value": f"[{from_name}]({sender_url})", "inline": True},
+            {"name": "Người nhận", "value": f"`{USERNAME}` (Bot)", "inline": True},
+            {"name": "Hộp thư Dmail", "value": f"[Mở trên Danbooru]({dm_url})", "inline": True},
+        ],
+        "footer": {"text": f"Dmail ID #{dm_id} • Shino Imako Forwarder"}
+    }
+    if created_at:
+        embed["timestamp"] = created_at
+
+    try:
+        resp = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=10)
+        if resp.status_code in (200, 204):
+            print(f"    [Discord] Đã chuyển tiếp Dmail #{dm_id} tới Discord Webhook.")
+        else:
+            print(f"    [!] Discord Webhook trả về mã lỗi HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"    [!] Lỗi khi gửi Dmail lên Discord: {e}")
+
+
+def forward_dmail_to_danbooru_owner(dm_id: int, owner_username: str, from_name: str, from_id: Optional[int], title: str, body: str):
+    """Gửi tin nhắn Dmail trên Danbooru từ tài khoản bot tới tài khoản của chủ sở hữu"""
+    url = f"{DANBOORU_HOST}/dmails.json"
+    dm_url = f"{DANBOORU_HOST}/dmails/{dm_id}"
+    sender_url = f"{DANBOORU_HOST}/users/{from_id}" if from_id else DANBOORU_HOST
+
+    forward_body = (
+        f"**[TIN NHẮN CHUYỂN TIẾP TỪ BOT {USERNAME}]**\n\n"
+        f"• **Người gửi:** {from_name} ({sender_url})\n"
+        f"• **Tiêu đề gốc:** {title}\n"
+        f"• **Link Dmail gốc:** {dm_url}\n\n"
+        f"**Nội dung:**\n"
+        f"{body}"
+    )
+
+    data = {
+        "dmail[to_name]": owner_username,
+        "dmail[title]": f"[Fwd from {from_name}] {title}"[:100],
+        "dmail[body]": forward_body
+    }
+
+    try:
+        resp = danbooru_api_request("POST", url, data=data)
+        if resp.status_code in (200, 201):
+            print(f"    [Danbooru] Đã chuyển tiếp Dmail #{dm_id} tới chủ sở hữu '{owner_username}'.")
+        else:
+            print(f"    [!] Lỗi khi chuyển tiếp Dmail tới '{owner_username}': HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"    [!] Lỗi khi gửi Dmail tới chủ sở hữu: {e}")
+
+
+def mark_dmail_as_read(dm_id: int):
+    """Đánh dấu dmail đã đọc trên Danbooru"""
+    url = f"{DANBOORU_HOST}/dmails/{dm_id}/mark_as_read.json"
+    try:
+        resp = danbooru_api_request("PUT", url)
+        if resp.status_code in (200, 204):
+            return
+        fallback_url = f"{DANBOORU_HOST}/dmails/{dm_id}.json"
+        danbooru_api_request("PUT", fallback_url, data={"dmail[is_read]": "true"})
+    except Exception:
+        pass
+
+
+def check_and_forward_dmails() -> int:
+    """
+    Kiểm tra hộp thư Danbooru Dmail của bot và chuyển tiếp tin nhắn đến chủ sở hữu:
+    1. Chuyển tiếp tới Discord qua Webhook (nếu có DISCORD_WEBHOOK_URL)
+    2. Chuyển tiếp tới tài khoản Danbooru của chủ sở hữu (nếu có BOT_OWNER_DANBOORU)
+    3. Đánh dấu đã đọc và lưu lịch sử để không chuyển tiếp trùng lặp.
+    """
+    if not USERNAME or not API_KEY:
+        return 0
+
+    owner_danbooru = BOT_OWNER_DANBOORU or os.getenv("BOT_OWNER_DANBOORU", "").strip()
+    if not DISCORD_WEBHOOK_URL and not owner_danbooru:
+        return 0
+
+    load_forwarded_dmails()
+
+    url = f"{DANBOORU_HOST}/dmails.json"
+    params = {
+        "limit": 25,
+        "search[folder]": "inbox"
+    }
+
+    try:
+        resp = danbooru_api_request("GET", url, params=params)
+        if resp.status_code != 200:
+            return 0
+
+        dmails = resp.json()
+        if not isinstance(dmails, list) or not dmails:
+            return 0
+
+        new_count = 0
+        for dm in dmails:
+            dm_id = dm.get("id")
+            if not dm_id or dm_id in _forwarded_dmails:
+                continue
+
+            from_id = dm.get("from_id")
+            from_name = dm.get("from_name") or (get_danbooru_username(from_id) if from_id else "Danbooru System")
+            title = dm.get("title", "(Không có tiêu đề)")
+            body = dm.get("body", "")
+            created_at = dm.get("created_at", "")
+
+            # Bỏ qua tin nhắn do chính bot gửi
+            if from_name.lower() == USERNAME.lower():
+                record_forwarded_dmail(dm_id)
+                continue
+
+            print(f"\n[📬 DMAIL MỚI] Nhận tin nhắn #{dm_id} từ '{from_name}': '{title}'")
+
+            # 1. Chuyển tiếp qua Discord Webhook
+            if DISCORD_WEBHOOK_URL:
+                forward_dmail_to_discord(dm_id, from_name, from_id, title, body, created_at)
+
+            # 2. Chuyển tiếp qua Danbooru DM tới chủ sở hữu (nếu cấu hình)
+            if owner_danbooru and owner_danbooru.lower() != from_name.lower():
+                forward_dmail_to_danbooru_owner(dm_id, owner_danbooru, from_name, from_id, title, body)
+
+            # 3. Đánh dấu đã đọc trên Danbooru
+            mark_dmail_as_read(dm_id)
+
+            # 4. Ghi nhận đã chuyển tiếp
+            record_forwarded_dmail(dm_id)
+            new_count += 1
+
+        if new_count > 0:
+            print(f"[+] Đã chuyển tiếp thành công {new_count} tin nhắn Dmail mới tới chủ sở hữu.")
+        return new_count
+
+    except Exception as e:
+        print(f"[!] Lỗi khi kiểm tra Dmail Danbooru: {e}")
+        return 0
+
+
 def check_readd_permission(post_id: int, copytag: str, policy: Optional[str] = None) -> Tuple[bool, str]:
     """
     Kiểm tra chính sách Re-add để chống chiến tranh tag (Edit-war):
@@ -916,17 +1216,33 @@ def scan_and_apply_copytags():
     B) CHƯA có trong database:
        - Kiểm tra post_count của character tag đó trên Danbooru.
        - Nếu post_count > MIN_POST_COUNT_AUTO (mặc định 1000):
-           lấy top 1 related copyright tag rồi gán thẳng vào post.
+           lấy top 1 related copyright tag rồi gán thẳng vào post,
+           đồng thời lưu ?chartag -> copytag vào database.
        - Nếu post_count <= 1000: bỏ qua.
+    C) CHÍNH SÁCH CHỈ ADD 1 LẦN (ONLY_ADD_ONCE):
+       - Bỏ qua bất kỳ post nào đã từng được bot thêm tag trước đó.
     """
+    # 0. Kiểm tra và chuyển tiếp Dmail nếu có tin nhắn mới
+    try:
+        check_and_forward_dmails()
+    except Exception as e:
+        print(f"[!] Lỗi khi kiểm tra Dmail trước khi quét: {e}")
+
+    # Nạp danh sách bài đăng đã xử lý ("chỉ add 1 lần")
+    if ONLY_ADD_ONCE:
+        load_added_posts()
+
     db_file_path = ensure_database_repo()
     approved_db, unapproved_db = parse_all_databases(DATABASE_REPO_DIR)
 
     print(f"[*] Đã tải {len(approved_db)} công thức ĐÃ DUYỆT từ database.")
     print(f"[*] Ngưỡng tự động: nhân vật chưa trong database xử lý nếu post_count > {MIN_POST_COUNT_FOR_AUTO_TAG}.")
+    if ONLY_ADD_ONCE:
+        print(f"[*] Chính sách 'Chỉ add 1 lần': BẬT ({len(_added_posts)} bài đăng đã từng xử lý trong lịch sử).")
 
     # Cache trong chu kỳ: chartag -> top1_copytag (hoặc None)
     _auto_cache: Dict[str, Optional[str]] = {}
+    pending_new_candidates: List[str] = []
 
     if not approved_db:
         print("[!] Database trống - Bot sẽ dùng chế độ tự động cho toàn bộ nhân vật.")
@@ -972,6 +1288,10 @@ def scan_and_apply_copytags():
                 if not post_id:
                     continue
 
+                # Kiểm tra tính năng "Chỉ add 1 lần"
+                if ONLY_ADD_ONCE and post_id in _added_posts:
+                    continue
+
                 # 1. Kiểm tra an toàn bộ lọc loại trừ client-side (-tag, -user:...)
                 if not scope.matches_post(post):
                     continue
@@ -983,6 +1303,8 @@ def scan_and_apply_copytags():
                 # Nếu tag_string_character rỗng, tìm các tag trong post mà có trong approved_db
                 if not character_tags:
                     character_tags = [t for t in current_tags if t in approved_db]
+
+                post_modified = False
 
                 for ch in character_tags:
                     # A. Nhân vật CÓ trong database đã duyệt
@@ -1018,15 +1340,16 @@ def scan_and_apply_copytags():
 
                             print(f"  [*] Post #{post_id}: '{ch}' ({post_count} bài > {MIN_POST_COUNT_FOR_AUTO_TAG}) -> chọn '{copytag}'.")
 
-                            # Gửi duyệt ?chartag -> copytag vào database và đẩy Git
+                            # Ghi nhận vào file database.txt
                             update_database_file(db_file_path, ch, [copytag], approved=False)
                             unapproved_db[ch] = [copytag]
-                            print(f"      -> Đã gửi duyệt vào database: ?{ch} -> {copytag}")
-                            git_push_database(f"Discovered candidate (>1000 posts): ?{ch} -> {copytag}")
+                            candidate_str = f"?{ch} -> {copytag}"
+                            if candidate_str not in pending_new_candidates:
+                                pending_new_candidates.append(candidate_str)
+                                print(f"      -> Đã ghi nhận chờ duyệt vào database: {candidate_str}")
 
                             if copytag in current_tags:
                                 continue
-
 
                     # 5. Kiểm tra chính sách Re-add chống edit-war
                     allowed, reason = check_readd_permission(post_id, copytag, policy=scope.readd_policy)
@@ -1043,15 +1366,27 @@ def scan_and_apply_copytags():
                     print(f"      [THÊM TAG] Hợp lệ! Đang gắn '{copytag}' vào Post #{post_id}...")
                     success = add_copytag_to_post(post_id, copytag, ch, current_tags=current_tags)
 
-
                     # 8. Gửi thông báo Discord nếu có cờ Noti:discord
                     if success:
                         current_tags.add(copytag)
+                        post_modified = True
                         if scope.should_notify_discord():
                             send_discord_notification(post_id, ch, copytag, post)
 
+                # Ghi nhận post đã xử lý nếu có tag được thêm thành công ("Chỉ add 1 lần")
+                if post_modified and ONLY_ADD_ONCE:
+                    record_added_post(post_id)
+                    print(f"      [+] Đã lưu Post #{post_id} vào danh sách chỉ add 1 lần.")
+
         except Exception as e:
             print(f"[!] Lỗi khi xử lý Rule #{idx}: {e}")
+
+    # Đẩy Git gom các candidates mới phát hiện trong chu kỳ này
+    if pending_new_candidates:
+        first_few = ", ".join(pending_new_candidates[:3])
+        more = "..." if len(pending_new_candidates) > 3 else ""
+        commit_msg = f"Discovered {len(pending_new_candidates)} candidates (>1000 posts): {first_few}{more}"
+        git_push_database(commit_msg)
 
 
 # ==========================================
