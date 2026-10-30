@@ -31,6 +31,7 @@ def run_loop_service(test_mode_override: Optional[bool] = None, run_once: bool =
     print(f"[*] Tài khoản        : {bot.USERNAME or '(Chưa thiết lập)'}")
     print(f"[*] Chế độ TEST_MODE : {'BẬT (Testbooru)' if bot.TEST_MODE else 'TẮT (Danbooru thật)'}")
     print(f"[*] Git Database     : {bot.DATABASE_REPO_URL}")
+    print(f"[*] Chế độ Git Push  : {'BẬT (Tự động push candidate)' if bot.GIT_PUSH_ENABLED else 'TẮT (Chỉ đọc Database)'}")
     print(f"[*] File phạm vi     : {bot.CHECKFILE_PATH}")
     print(f"[*] Vòng lặp 24/7    : {'BẬT (Mỗi ' + str(LOOP_INTERVAL) + 's)' if not run_once else 'TẮT (Chạy 1 lần)'}")
     print("=" * 65 + "\n")

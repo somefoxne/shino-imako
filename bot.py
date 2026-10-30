@@ -39,6 +39,10 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DEFAULT_READD_POLICY = os.getenv("RE_ADD_POLICY", "never").strip().lower()
 
+# Chế độ Git Database:
+# GIT_PUSH_ENABLED: 'false'/'off' -> Chỉ đọc database, tắt hoàn toàn commit & push Git
+GIT_PUSH_ENABLED = os.getenv("GIT_PUSH_ENABLED", "false").strip().lower() in ("true", "1", "yes", "on")
+
 # 2 Kho Git riêng biệt:
 DATABASE_REPO_URL = os.getenv(
     "DATABASE_REPO_URL", 
@@ -230,7 +234,11 @@ def ensure_database_repo() -> str:
 def git_push_database(commit_message: str):
     """
     Commit và push các thay đổi trong file database.txt lên git database repo
+    (Nếu GIT_PUSH_ENABLED=false thì bỏ qua, chỉ đọc)
     """
+    if not GIT_PUSH_ENABLED:
+        return
+
     if not os.path.exists(os.path.join(DATABASE_REPO_DIR, ".git")):
         print("[-] Thư mục database không phải git repository, bỏ qua git push.")
         return
@@ -895,14 +903,18 @@ def scan_and_apply_copytags():
                     if ch not in approved_db:
                         if ch not in unapproved_db:
                             print(f"  [*] Post #{post_id}: Phát hiện character tag '{ch}' chưa có trong database.")
-                            top_tags = fetch_top_copyright_tags(ch, limit=10)
-                            if top_tags:
-                                unapproved_db[ch] = top_tags
-                                update_database_file(db_file_path, ch, top_tags, approved=False)
-                                print(f"      -> Tự động lưu database chờ duyệt: ?{ch} -> {' '.join(top_tags)}")
-                                git_push_database(f"Discovered new candidate: ?{ch} -> {' '.join(top_tags)}")
+                            if GIT_PUSH_ENABLED:
+                                top_tags = fetch_top_copyright_tags(ch, limit=10)
+                                if top_tags:
+                                    unapproved_db[ch] = top_tags
+                                    update_database_file(db_file_path, ch, top_tags, approved=False)
+                                    print(f"      -> Tự động lưu database chờ duyệt: ?{ch} -> {' '.join(top_tags)}")
+                                    git_push_database(f"Discovered new candidate: ?{ch} -> {' '.join(top_tags)}")
+                                else:
+                                    unapproved_db[ch] = []
                             else:
                                 unapproved_db[ch] = []
+                                print(f"      -> [Chế độ Chỉ Đọc] Bỏ qua cào/push Git cho '{ch}'.")
                         # Không gắn vào post vì quy tắc chưa được duyệt
                         continue
 
