@@ -1,3 +1,4 @@
+import fnmatch
 from typing import List, Set, Dict, Any, Optional
 
 class CheckScope:
@@ -65,6 +66,7 @@ class CheckScope:
     def matches_post(self, post: Dict[str, Any]) -> bool:
         """
         Kiểm tra an toàn bổ sung ở phía client (đặc biệt các tag loại trừ có dấu trừ -).
+        Hỗ trợ so khớp mẫu đại diện wildcard (*) như -shirt_*, -*_shirt, -*shirt*, -user:*...
         """
         post_tags = set(post.get("tag_string", "").split())
         uploader_name = str(post.get("uploader_name", "")).lower()
@@ -75,11 +77,19 @@ class CheckScope:
                 neg = tag[1:]
                 if neg.lower().startswith("user:"):
                     target_u = neg[len("user:"):].lower()
-                    if uploader_name and uploader_name == target_u:
-                        return False
+                    if uploader_name:
+                        if "*" in target_u:
+                            if fnmatch.fnmatch(uploader_name, target_u):
+                                return False
+                        elif uploader_name == target_u:
+                            return False
                 else:
-                    if neg in post_tags:
-                        return False
+                    if "*" in neg:
+                        if any(fnmatch.fnmatch(pt, neg) for pt in post_tags):
+                            return False
+                    else:
+                        if neg in post_tags:
+                            return False
 
         return True
 

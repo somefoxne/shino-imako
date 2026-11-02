@@ -5,6 +5,7 @@ import re
 import json
 import subprocess
 import requests
+import fnmatch
 from typing import Dict, List, Tuple, Optional, Any, Set
 
 
@@ -336,6 +337,24 @@ def parse_database(filepath: str) -> Tuple[Dict[str, str], Dict[str, List[str]]]
                         approved_db[chartag] = clean_tags[0]
 
     return approved_db, unapproved_db
+
+
+def match_copytag_from_db(chartag: str, approved_db: Dict[str, str]) -> Optional[str]:
+    """
+    Tra cứu copytag tương ứng với chartag trong approved_db:
+    1. Ưu tiên khớp chính xác (Exact match): vd 'tokino_sora' -> 'hololive'
+    2. Nếu không khớp chính xác, kiểm tra các mẫu wildcard (*):
+       vd '*_(hololive)' -> 'hololive', '*nm' -> 'tag2' (khớp với 'adknm' -> 'tag2')
+    """
+    if chartag in approved_db:
+        return approved_db[chartag]
+
+    # Kiểm tra các quy tắc có dấu đại diện *
+    for pattern, copytag in approved_db.items():
+        if "*" in pattern and fnmatch.fnmatch(chartag, pattern):
+            return copytag
+
+    return None
 
 
 def parse_all_databases(repo_dir: str) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
@@ -941,13 +960,16 @@ def scan_and_apply_copytags():
                 char_tag_string = post.get("tag_string_character", "")
                 character_tags = char_tag_string.split() if char_tag_string else []
 
-                # Nếu tag_string_character rỗng, tìm các tag trong post mà có trong approved_db
+                # Nếu tag_string_character rỗng, tìm các tag trong post mà khớp với approved_db (kể cả wildcard)
                 if not character_tags:
-                    character_tags = [t for t in current_tags if t in approved_db]
+                    character_tags = [t for t in current_tags if match_copytag_from_db(t, approved_db) is not None]
 
                 for ch in character_tags:
+                    # Kiểm tra xem nhân vật có khớp trong approved_db không (chính xác hoặc wildcard)
+                    matched_copytag = match_copytag_from_db(ch, approved_db)
+
                     # 2. Xử lý nhân vật chưa được DUYỆT
-                    if ch not in approved_db:
+                    if not matched_copytag:
                         if ch not in unapproved_db:
                             print(f"  [*] Post #{post_id}: Phát hiện character tag '{ch}' chưa có trong database.")
                             if GIT_PUSH_ENABLED:
@@ -965,10 +987,8 @@ def scan_and_apply_copytags():
                         # Không gắn vào post vì quy tắc chưa được duyệt
                         continue
 
-                    # 3. Nhân vật đã được DUYỆT trong approved_db
-                    copytag = approved_db.get(ch)
-                    if not copytag:
-                        continue
+                    # 3. Nhân vật đã được DUYỆT trong approved_db (khớp chính xác hoặc qua mẫu wildcard *)
+                    copytag = matched_copytag
 
                     # 4. Kiểm tra bài đăng có thiếu copytag không
                     if copytag in current_tags:
