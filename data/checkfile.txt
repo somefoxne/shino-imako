@@ -1,1 +1,1 @@
-user:thefoxne
+user:thefoxne age:<24h
